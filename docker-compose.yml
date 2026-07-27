@@ -36,6 +36,7 @@ services:
       RECON_RATE_LIMIT: "5"            # req/s/host des binaires recon (httpx/katana)
       # RECON_PROXY: "http://partenaire-proxy-rotatif:8080"  # egress IPs tournantes (recon)
       # --- Recon TIÉRÉE (éditable) ---
+      ENUMERATE_SUBDOMAINS: "${ENUMERATE_SUBDOMAINS:-0}"  # 0=off (liste déjà exhaustive) ; 1=subfinder par host
       SHALLOW_CRAWL_DEPTH: "1"         # TIER1 : profondeur de crawl shallow (0-1)
       SEUIL_DEEP: "5"                  # TIER2 : score shallow mini pour promouvoir en deep
       SEUIL_DEEP_SURFACE: "20"         # TIER2 : ou surface (nb URLs) mini

@@ -20,6 +20,11 @@ DATABASE_URL = os.environ["DATABASE_URL"]
 RL_RETRY_COUNTDOWN = int(os.environ.get("RL_RETRY_COUNTDOWN", "20"))  # s entre retentatives d'admission
 
 # --- Recon TIÉRÉE (config éditable) -------------------------------------------
+# Énumération de sous-domaines (subfinder) par host : OFF par défaut. Sur une liste
+# 48k qui CONTIENT DÉJÀ racines + sous-domaines, subfinder ré-énumère du connu et est
+# lent (OSINT) -> gaspillage. OFF => on httpx le host DIRECTEMENT. L'expansion des
+# sous-domaines INCONNUS = passe séparée (ENUMERATE_SUBDOMAINS=1 sur les racines).
+ENUMERATE_SUBDOMAINS = os.environ.get("ENUMERATE_SUBDOMAINS", "0").lower() in ("1", "true", "yes", "on")
 # TIER 1 shallow : profondeur de crawl faible (0-1), pas de crawl JS -> rapide sur
 # TOUS les hosts, tue les morts en secondes, produit un score de premier ordre.
 SHALLOW_CRAWL_DEPTH = int(os.environ.get("SHALLOW_CRAWL_DEPTH", "1"))
@@ -149,7 +154,9 @@ def _recon_pipeline(host, shallow):
     (rapide, tue les morts en secondes) ; shallow=False : crawl profond + JS (deep).
     Un host non vivant n'insère rien (0 ligne = mort, tué au tier 1)."""
     tier = "shallow" if shallow else "deep"
-    subdomains = tools.run_subfinder(host)
+    # La liste 48k contient déjà les sous-domaines connus : par défaut on ne
+    # ré-énumère PAS (subfinder est lent, OSINT) -> on httpx le host directement.
+    subdomains = tools.run_subfinder(host) if ENUMERATE_SUBDOMAINS else [host]
     live = tools.run_httpx(subdomains)          # liveness + tech + title + statut
     root_urls = [o["url"] for o in live if o.get("url")]
     if not root_urls:                            # MORT : on s'arrête à la frontière
