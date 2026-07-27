@@ -16,10 +16,11 @@ import time
 import urllib.error
 import urllib.request
 from difflib import SequenceMatcher
-from urllib.parse import urlsplit
+from urllib.parse import parse_qsl, urlsplit
 
 import psycopg
 
+from engine import ratelimit
 from engine.celery_app import app
 from engine.gate import gate
 from knowledge import sonde
@@ -28,14 +29,46 @@ log = logging.getLogger(__name__)
 DATABASE_URL = os.environ["DATABASE_URL"]
 
 
-def _pattern_and_id(path):
-    """Remplace le dernier segment purement numérique par {id}. -> (pattern, id)."""
-    segs = path.split("/")
+def _content_type_stocke(headers):
+    """Content-type depuis les response_headers stockés (dict), insensible à la
+    casse ET au séparateur ('content-type' / 'Content-Type' / 'content_type')."""
+    if not isinstance(headers, dict):
+        return None
+    for k, v in headers.items():
+        if k.lower().replace("-", "_") == "content_type":
+            return v
+    return None
+
+
+# Clés de paramètre désignant un identifiant d'objet (aligné sur signaux._ID_PARAM_KEYS).
+_ID_QUERY_KEYS = {
+    "id", "uid", "uuid", "guid", "account", "accountid", "customer", "customerid",
+    "contract", "contractid", "user", "userid", "member", "memberid", "order",
+    "orderid", "invoice", "invoiceid", "doc", "docid", "file", "fileid",
+    "num", "no", "cat", "pid",
+}
+
+
+def _pattern_and_id(parts):
+    """(pattern, id) : remplace l'id VARIABLE par {id}. Gère (1) le dernier segment
+    numérique du chemin (/banque/103), et à défaut (2) un paramètre-id de requête
+    (/api/...?id=<opaque>) — pour sonder les ids DÉJÀ DÉCOUVERTS d'une API objet-par-id
+    (l'espace opaque n'est pas énumérable : on ne sonde que le connu)."""
+    segs = parts.path.split("/")
     for i in range(len(segs) - 1, -1, -1):
         if segs[i].isdigit():
             idv = segs[i]
             segs[i] = "{id}"
-            return "/".join(segs), idv
+            pat = "/".join(segs)
+            return (pat + "?" + parts.query) if parts.query else pat, idv
+    # pas d'id numérique de chemin -> tente un paramètre-id de requête
+    pairs = parse_qsl(parts.query, keep_blank_values=True)
+    for i, (k, v) in enumerate(pairs):
+        kl = k.lower()
+        if v and (kl in _ID_QUERY_KEYS or kl.endswith("_id") or kl == "id"):
+            q = "&".join((f"{kk}={{id}}" if j == i else f"{kk}={vv}")
+                         for j, (kk, vv) in enumerate(pairs))
+            return parts.path + "?" + q, v
     return None, None
 
 
@@ -47,11 +80,20 @@ class _SansRedirection(urllib.request.HTTPRedirectHandler):
         return None
 
 
-_OPENER = urllib.request.build_opener(_SansRedirection())
+def _build_opener():
+    handlers = [_SansRedirection()]
+    if ratelimit.RECON_PROXY:  # point d'accroche egress : IPs tournantes du partenaire
+        handlers.append(urllib.request.ProxyHandler(
+            {"http": ratelimit.RECON_PROXY, "https": ratelimit.RECON_PROXY}))
+    return urllib.request.build_opener(*handlers)
+
+
+_OPENER = _build_opener()
 
 
 def _get(url, host_lancement):
-    """GET borné, GET UNIQUEMENT. Renvoie (status, corps_texte). Jamais d'écriture.
+    """GET borné, GET UNIQUEMENT. Renvoie (status, corps_texte, content_type).
+    Jamais d'écriture.
 
     Passe d'abord le CONFINEMENT : si le host cible n'est pas le host de lancement
     (ou un sous-domaine), la requête ne part pas (refus dur loggé par le gate).
@@ -59,24 +101,42 @@ def _get(url, host_lancement):
     try:
         gate.confiner(host_lancement, url)
     except gate.HorsCibleError:
-        return None, ""  # refus dur : requête bloquée (déjà loggée par le gate)
+        return None, "", None  # refus dur : requête bloquée (déjà loggée par le gate)
+    cible = urlsplit(url).hostname or host_lancement
+    ratelimit.throttle_egress(cible)   # CONTRÔLE CENTRAL : cap global + par-filiale
     req = urllib.request.Request(
         url, method="GET",
         headers={"User-Agent": "bb-recon-probe/1.0 (read-only, GET)"},
     )
+
+    def _instrumenter(status, body, t0):
+        ratelimit.record_request(cible)
+        ratelimit.record_latency((time.time() - t0) * 1000.0)   # latence p50/p95
+        sig = ratelimit.est_signal_debit(status, body)          # 429 / challenge = DÉBIT
+        if sig:
+            ratelimit.signal_debit_et_evaluer(sig)              # accumule + rote si seuil franchi
+        if ratelimit.est_reponse_waf(status, url):
+            ratelimit.record_waf(cible, status, url)
+
+    t0 = time.time()
     try:
         with _OPENER.open(req, timeout=sonde.TIMEOUT_REQUETE) as resp:
             body = resp.read(sonde.MAX_CORPS_OCTETS)
-            return resp.status, body.decode("utf-8", "replace")
+            ct = resp.headers.get_content_type() if resp.headers else None
+            txt = body.decode("utf-8", "replace")
+            _instrumenter(resp.status, txt, t0)
+            return resp.status, txt, ct
     except urllib.error.HTTPError as e:  # 3xx (non suivi) / 4xx / 5xx
         try:
             body = e.read(sonde.MAX_CORPS_OCTETS).decode("utf-8", "replace")
         except Exception:
             body = ""
-        return e.code, body
+        ct = e.headers.get_content_type() if e.headers else None
+        _instrumenter(e.code, body, t0)
+        return e.code, body, ct
     except Exception as e:  # DNS, TLS, timeout... -> pas de réponse exploitable
         log.warning("sonde: echec GET %s : %s", url, e)
-        return None, ""
+        return None, "", None
 
 
 def _similarite(bodies):
@@ -91,47 +151,72 @@ def _similarite(bodies):
 
 
 def _comparer(pattern, reponses, borne_status):
-    """Verdict DÉTERMINISTE à partir des réponses observées (aucun jugement de sens)."""
-    vivants = [(idv, body) for idv, st, body in reponses if st == 200 and body]
+    """Verdict DÉTERMINISTE, PER-ID (jamais de vote majoritaire) : l'outlier data fait
+    la cible, pas la majorité. Chaque id sondé est jugé par son content-type."""
+    vivants = [(idv, body, ct) for idv, st, body, ct in reponses if st == 200 and body]
     n200 = len(vivants)
     base = {"pattern": pattern, "n_sonde": len(reponses), "n200": n200,
             "borne_status": borne_status}
-    if n200 < 2:
-        return {**base, "verdict": "indetermine", "delta": 0,
-                "texte": f"sonde: {n200} reponse(s) 200 exploitable(s) sur {len(reponses)} id -> indetermine"}
-
-    sim = round(_similarite([b for _, b in vivants]), 3)
-    base["similarite"] = sim
     borne_txt = f", borne id={sonde.ID_BORNE}->{borne_status}" if borne_status is not None else ""
+    if n200 < 1:
+        return {**base, "verdict": "indetermine", "delta": 0,
+                "texte": f"sonde: 0 reponse 200 exploitable sur {len(reponses)} id -> indetermine"}
 
+    # PER-ID : sépare les id-asset (public par nature) des id-DATA (donnée possédée
+    # potentielle : html/json/xml/pdf/octet-stream/plain).
+    data = [(idv, body) for idv, body, ct in vivants if not sonde.est_content_type_asset(ct)]
+    assets = [(idv, ct) for idv, _, ct in vivants if sonde.est_content_type_asset(ct)]
+
+    # TOUS les échantillons sont des assets -> public_asset (+ malus, borné, jamais retiré).
+    if not data:
+        cts = ",".join(sorted(set((ct or "").split(";")[0] for _, ct in assets)))
+        return {**base, "verdict": "public_asset", "delta": sonde.MALUS_ASSET_PUBLIC,
+                "texte": f"sonde: {len(assets)}/{n200} id assets ({cts}), aucun non-asset -> public_asset{borne_txt}"}
+
+    # AU MOINS un id non-asset -> ESCALADE (aucun malus). L'outlier data fait la cible.
+    outliers = ",".join(idv for idv, _ in data)
+    if len(data) < 2:
+        # Un seul id data parmi des assets : on ne peut pas comparer, mais on NE noie
+        # PAS l'outlier -> escalade vers le juge sémantique (étape 2).
+        return {**base, "verdict": "candidat_data", "delta": 0,
+                "texte": f"sonde: {len(assets)} asset + 1 non-asset (id={outliers}) -> escalade candidat_data (outlier donnee, juge etape 2){borne_txt}"}
+
+    # Plusieurs id data : similarité SUR LES DONNÉES seulement (assets écartés).
+    sim = round(_similarite([b for _, b in data]), 3)
+    base["similarite"] = sim
+    n_asset_txt = f" ({len(assets)} asset ecarte(s))" if assets else ""
     if sim >= sonde.SIMILARITE_IDENTIQUE:
         return {**base, "verdict": "probable_public", "delta": sonde.MALUS_PROBABLE_PUBLIC,
-                "texte": f"sonde: contenu identique sur {n200} id (sim={sim}{borne_txt}) -> probable public"}
-    if sim >= sonde.SIMILARITE_GABARIT_MIN and n200 >= sonde.MIN_200_STABLE:
+                "texte": f"sonde: contenu identique sur {len(data)} id non-asset (sim={sim}{borne_txt}){n_asset_txt} -> probable public"}
+    if sim >= sonde.SIMILARITE_GABARIT_MIN and len(data) >= sonde.MIN_200_STABLE:
         return {**base, "verdict": "candidat_serieux", "delta": sonde.BONUS_CANDIDAT_SERIEUX,
-                "texte": f"sonde: 200 stable sur {n200} id, contenu diff structure (sim={sim}{borne_txt}) -> candidat serieux"}
+                "texte": f"sonde: {len(data)} id non-asset en 200, contenu diff structure (sim={sim}{borne_txt}){n_asset_txt} -> candidat serieux"}
     return {**base, "verdict": "indetermine", "delta": 0,
-            "texte": f"sonde: {n200} id en 200, similarite {sim} hors seuils{borne_txt} -> indetermine"}
+            "texte": f"sonde: {len(data)} id non-asset, similarite {sim} hors seuils{borne_txt}{n_asset_txt} -> indetermine"}
 
 
 def _sonder_groupe(scheme, netloc, pattern, membres, budget, host_lancement):
     """Sonde un groupe /pattern/{id} : GET throttlés, confinés, dans la limite du budget."""
-    echantillon = sorted(membres, key=lambda m: int(m["idv"]))[:sonde.TAILLE_ECHANTILLON]
+    # Tri stable : ids numériques d'abord (ordre naturel), puis opaques (lexical).
+    def _cle(m):
+        idv = m["idv"]
+        return (0, int(idv), "") if idv.isdigit() else (1, 0, idv)
+    echantillon = sorted(membres, key=_cle)[:sonde.TAILLE_ECHANTILLON]
     reponses = []
     for m in echantillon:
         if budget["restant"] <= 0:
             break
-        st, body = _get(m["url"], host_lancement)
+        st, body, ct = _get(m["url"], host_lancement)
         budget["restant"] -= 1
-        log.info("sonde GET status=%s len=%s budget=%s url=%s",
-                 st, len(body), budget["restant"], m["url"])
-        reponses.append((m["idv"], st, body))
+        log.info("sonde GET status=%s ct=%s len=%s budget=%s url=%s",
+                 st, ct, len(body), budget["restant"], m["url"])
+        reponses.append((m["idv"], st, body, ct))
         time.sleep(sonde.DELAI_ENTRE_REQUETES)
 
     borne_status = None
     if sonde.SONDER_BORNE and budget["restant"] > 0:
         borne_url = f"{scheme}://{netloc}" + pattern.replace("{id}", str(sonde.ID_BORNE))
-        borne_status, _ = _get(borne_url, host_lancement)
+        borne_status, _, _ = _get(borne_url, host_lancement)
         budget["restant"] -= 1
         log.info("sonde GET-borne status=%s budget=%s url=%s",
                  borne_status, budget["restant"], borne_url)
@@ -194,7 +279,7 @@ def probe_idor_candidates(host):
         with conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT id, url, http_status, score
+                SELECT id, url, http_status, score, response_headers
                 FROM targets
                 WHERE array_to_string(score_raisons, ',') LIKE %s
                   AND (http_status = 200 OR http_status BETWEEN 300 AND 399)
@@ -204,11 +289,30 @@ def probe_idor_candidates(host):
             )
             rows = cur.fetchall()
 
-    # Groupe par (schéma, netloc, pattern-à-id-variable)
+    # COURT-CIRCUIT content-type STOCKÉ, CONDITIONNEL À LA VALEUR (FIX 2) :
+    #  - score < SEUIL_SONDE (faible valeur) ET type stocké = asset -> on fait confiance
+    #    à l'échantillon stocké : public_asset + malus, 0 requête (efficacité sûre) ;
+    #  - score >= SEUIL_SONDE (lead à valeur) -> on NE court-circuite PAS : on sonde
+    #    d'AUTRES ids découverts et on juge per-id (on ne parie pas sur un seul échantillon).
+    a_sonder = []
+    court_circuits = []
+    for row_id, url, status, score, headers in rows:
+        ct = _content_type_stocke(headers)
+        if (score or 0) < sonde.SEUIL_SONDE and ct and sonde.est_content_type_asset(ct):
+            court_circuits.append({"row_id": row_id, "url": url, "ct": ct})
+        else:
+            a_sonder.append((row_id, url, status, score))
+
+    for cc in court_circuits:
+        texte = ("sonde: content-type stocke %s, score<%d -> public_asset (court-circuit, 0 requete)"
+                 % ((cc["ct"] or "").split(";")[0], sonde.SEUIL_SONDE))
+        _appliquer({"delta": sonde.MALUS_ASSET_PUBLIC, "texte": texte}, [{"row_id": cc["row_id"]}])
+
+    # Groupe par (schéma, netloc, pattern-à-id-variable) — sur les NON court-circuités.
     groupes = {}
-    for row_id, url, status, score in rows:
+    for row_id, url, status, score in a_sonder:
         parts = urlsplit(url)
-        pattern, idv = _pattern_and_id(parts.path)
+        pattern, idv = _pattern_and_id(parts)
         if pattern is None:
             continue
         groupes.setdefault((parts.scheme, parts.netloc, pattern), []).append(
@@ -233,7 +337,9 @@ def probe_idor_candidates(host):
     return {
         "host": host,
         "groupes_id_dans_cible": len(groupes),
+        "public_asset_court_circuit": len(court_circuits),
         "requetes_utilisees": sonde.MAX_REQUETES_PAR_HOST - budget["restant"],
+        "requetes_economisees_court_circuit": len(court_circuits),
         "budget_max": sonde.MAX_REQUETES_PAR_HOST,
         "hors_cible_marques": hors_cible,
         "verdicts": verdicts,

@@ -28,3 +28,33 @@ MIN_200_STABLE = 3                     # nb min de 200 dans l'échantillon pour 
 # --- Ajustements de score (la décision vit ici) -------------------------------
 BONUS_CANDIDAT_SERIEUX = 4            # 200 stable + contenu diff structuré
 MALUS_PROBABLE_PUBLIC = -4           # contenu identique quel que soit l'id
+
+# --- Content-type : garer les ASSETS de présentation comme "public" -----------
+# Types de PRÉSENTATION (pas des données possédées) : un endpoint qui rend ça est
+# public par nature — inutile de le sonder, des variantes différentes (images) ne
+# doivent pas déclencher candidat_serieux par similarité basse.
+# NE PAS y mettre application/pdf, application/xml, application/json, text/html,
+# application/octet-stream, text/plain : ce sont des DONNÉES potentielles (un PDF/XML
+# peut être un document possédé fuité) -> elles continuent vers la similarité (et le
+# juge sémantique en étape 2). Set éditable.
+ASSET_CONTENT_TYPES = {
+    "image/*", "font/*", "audio/*", "video/*",
+    "text/css", "application/javascript", "text/javascript",
+}
+MALUS_ASSET_PUBLIC = -4              # dépriorisation d'un endpoint d'asset (borné à 0, jamais retiré)
+
+# Valeur du lead au-dessus de laquelle on NE fait PAS confiance à l'échantillon
+# stocké : on SONDE d'autres ids découverts (per-id) au lieu de court-circuiter sur un
+# seul content-type. En dessous, on fait confiance au stocké (asset -> public, 0 req).
+SEUIL_SONDE = 3
+
+
+def est_content_type_asset(ct):
+    """True si le content-type est un type de PRÉSENTATION (asset public).
+    Insensible à la casse, ignore le charset (';'), gère les familles image/* etc."""
+    ct = (ct or "").split(";")[0].strip().lower()
+    if not ct:
+        return False
+    if ct in ASSET_CONTENT_TYPES:
+        return True
+    return (ct.split("/")[0] + "/*") in ASSET_CONTENT_TYPES

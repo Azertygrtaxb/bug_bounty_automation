@@ -45,6 +45,14 @@ _ID_PARAM_KEYS = {
 }
 _OPAQUE = re.compile(r"^[A-Za-z0-9._~+/=-]{8,}$")  # base64/hex/jwt-ish, non purement numérique
 
+# --- Récupération d'objet par id sur une API (BOLA/IDOR) -----------------------
+# "/api/" est une convention générique (pas host-spécifique). Un id sur ce chemin =
+# récupération d'objet par référence : cible de première classe, INDÉPENDAMMENT de la
+# devinabilité (une référence fuitée n'a pas besoin d'énumération ; un ObjectId n'est
+# pas opaque-sûr). Poids éditable, s'ADDITIONNE à id_non_derive_session.
+_API_PATH = re.compile(r"/api/", re.IGNORECASE)
+API_OBJET_PAR_ID = 5
+
 # --- Motifs de flux d'authentification (éditable). Couvre les séparateurs
 # courants (sign_up / sign-up / signup) pour ne pas rater une surface "vuln clé"
 # comme la création de compte. Cherché dans le chemin ET dans le title.
@@ -282,6 +290,30 @@ def id_non_derive_session(t):
     return best
 
 
+def api_objet_par_id(t):
+    """BOOLÉEN. Un identifiant sur un chemin /api/ = récupération d'objet par
+    référence => surface BOLA/IDOR de première classe, INDÉPENDAMMENT de la
+    devinabilité de l'id. Signal de PRIORITÉ : monte la cible, ne conclut rien —
+    le corps stocké dira ensuite si l'API rend de la donnée possédée ou du public.
+    S'ADDITIONNE à id_non_derive_session (la gradation numérique/séquentielle y reste,
+    donc un id devinable reste plus fort). Assets exclus."""
+    if _hors_surface(t):
+        return False
+    parts = urlsplit(_url(t))
+    if not _API_PATH.search(parts.path):
+        return False
+    # id dans un segment de chemin (/api/users/123, /api/.../{uuid})
+    for seg in parts.path.split("/"):
+        if seg.isdigit() or _UUID_ANY.search(seg):
+            return True
+    # id en paramètre de requête (?id=..., ?documentId=...), valeur non vide
+    for key, value in parse_qsl(parts.query, keep_blank_values=True):
+        kl = key.lower()
+        if value and (kl in _ID_PARAM_KEYS or kl.endswith("_id") or kl == "id"):
+            return True
+    return False
+
+
 def fingerprint_produit(t):
     """GRADUÉ. Croise le PRODUIT détecté (dans tech[]/title, pas l'URL) avec la
     NATURE du chemin — le fingerprint ne s'applique plus à l'identique à tout le host :
@@ -360,6 +392,7 @@ def verbe_state_changing_en_GET(t):
 SIGNAUX = [
     ("fingerprint_produit",         fingerprint_produit,         None),
     ("id_non_derive_session",       id_non_derive_session,       None),
+    ("api_objet_par_id",            api_objet_par_id,            API_OBJET_PAR_ID),
     ("flux_auth",                   flux_auth,                   5),
     ("mouvement_argent",            mouvement_argent,            5),
     ("surface_exposee",             surface_exposee,             None),

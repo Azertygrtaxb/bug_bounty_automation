@@ -29,4 +29,6 @@ RUN pip install --no-cache-dir -r engine/requirements.txt
 COPY engine/ ./engine/
 COPY knowledge/ ./knowledge/
 
-CMD ["celery", "-A", "engine.celery_app", "worker", "--loglevel=INFO"]
+# Concurrence bornée et éditable (défaut conservateur). Plusieurs hosts DISTINCTS en
+# parallèle ; l'admission centrale (ratelimit) garantit un seul worker par host.
+CMD ["sh", "-c", "celery -A engine.celery_app worker --loglevel=INFO --concurrency=${CELERY_CONCURRENCY:-8}"]
