@@ -22,10 +22,14 @@ l'a posé (par_qui). BOARD_EXPOSE=0 (défaut) publie sur 127.0.0.1 (tunnel SSH) 
 0.0.0.0 (login déjà obligatoire de toute façon).
 """
 import base64
+import getpass
+import hashlib
 import hmac
 import json
 import os
 import sys
+import threading
+import time
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -39,20 +43,22 @@ HTML = Path(__file__).resolve().parent / "board.html"
 PORT = int(os.environ.get("BOARD_PORT", "8080"))
 BIND = os.environ.get("BOARD_BIND", "0.0.0.0")  # publish côté host contrôle l'exposition réelle
 EXPOSE = os.environ.get("BOARD_EXPOSE", "0").lower() in ("1", "true", "yes", "on")
+PBKDF2_ITERS = int(os.environ.get("BOARD_PBKDF2_ITERS", "600000"))
 
 
 def _parse_comptes(raw, legacy_user, legacy_pass):
-    """BOARD_ACCOUNTS='alice:passA,bob:passB' -> {user: pass}. Fusionne l'éventuel couple
-    legacy BOARD_USER/BOARD_PASS. Board PARTAGÉ : login OBLIGATOIRE, au moins un compte."""
+    """BOARD_ACCOUNTS='alice:<secret>,bob:<secret>' -> {user: secret}. Le <secret> est soit
+    un hash 'pbkdf2$<iter>$<salt_b64>$<hash_b64>', soit un mot de passe en CLAIR (rétro-compat,
+    averti au démarrage). Le split se fait sur le 1er ':' (le hash n'en contient pas)."""
     comptes = {}
     for pair in (raw or "").split(","):
         pair = pair.strip()
         if not pair or ":" not in pair:
             continue
-        u, _, p = pair.partition(":")
-        u, p = u.strip(), p.strip()
-        if u and p:
-            comptes[u] = p
+        u, _, secret = pair.partition(":")
+        u, secret = u.strip(), secret.strip()
+        if u and secret:
+            comptes[u] = secret
     if legacy_user and legacy_pass:
         comptes.setdefault(legacy_user.strip(), legacy_pass)
     return comptes
@@ -60,6 +66,88 @@ def _parse_comptes(raw, legacy_user, legacy_pass):
 
 COMPTES = _parse_comptes(os.environ.get("BOARD_ACCOUNTS", ""),
                          os.environ.get("BOARD_USER", ""), os.environ.get("BOARD_PASS", ""))
+
+
+# Pourquoi hacher alors que le VPS a déjà la base ? Le risque n'est PAS le VPS compromis
+# (qui a la base a tout de toute façon) : c'est la RÉUTILISATION du mot de passe ailleurs.
+# Un mot de passe en clair dans .env/l'environnement fuite un secret réutilisé (mail, VPN…) ;
+# un hash pbkdf2 ne le fuite pas.
+def _est_hache(secret):
+    return secret.startswith("pbkdf2$")
+
+
+def _verifie_secret(pwd, secret):
+    """TIMING-SAFE. Vérifie `pwd` contre un secret haché (pbkdf2$iter$salt$hash) OU en clair."""
+    if _est_hache(secret):
+        try:
+            _, iters, salt_b64, hash_b64 = secret.split("$")
+            salt, attendu = base64.b64decode(salt_b64), base64.b64decode(hash_b64)
+            got = hashlib.pbkdf2_hmac("sha256", pwd.encode("utf-8"), salt, int(iters))
+            return hmac.compare_digest(got, attendu)
+        except Exception:
+            return False
+    return hmac.compare_digest(pwd, secret)
+
+
+def _verifier(user, pwd):
+    """True si (user, pwd) valide. User inconnu -> calcul bidon pour lisser le timing."""
+    secret = COMPTES.get(user)
+    if secret is None:
+        hashlib.pbkdf2_hmac("sha256", b"x", b"x", PBKDF2_ITERS)  # anti-énumération par timing
+        return False
+    return _verifie_secret(pwd, secret)
+
+
+def _fabriquer_hash(pwd):
+    """pwd -> 'pbkdf2$<iter>$<salt_b64>$<hash_b64>'. Sel aléatoire (os.urandom)."""
+    salt = os.urandom(16)
+    dk = hashlib.pbkdf2_hmac("sha256", pwd.encode("utf-8"), salt, PBKDF2_ITERS)
+    return "pbkdf2$%d$%s$%s" % (PBKDF2_ITERS, base64.b64encode(salt).decode(),
+                                base64.b64encode(dk).decode())
+
+
+# --- Journal d'authentification (stderr, une ligne horodatée par événement) ----------
+def _journal(msg):
+    sys.stderr.write("%s [board] %s\n" % (datetime.now(timezone.utc).isoformat(timespec="seconds"), msg))
+    sys.stderr.flush()
+
+
+# --- Anti-bruteforce : compteur d'échecs par (user, IP), en mémoire (process long-vivant) --
+_ECHECS = {}
+_ECHECS_LOCK = threading.Lock()
+
+
+def _retry_si_bloque(user, ip):
+    """Secondes de Retry-After si (user, ip) dépasse le seuil dans la fenêtre, sinon 0."""
+    maxi, fen = config.BOARD_MAX_ECHECS, config.BOARD_FENETRE_ECHECS
+    now = time.monotonic()
+    with _ECHECS_LOCK:
+        ts = [t for t in _ECHECS.get((user, ip), []) if now - t < fen]
+        _ECHECS[(user, ip)] = ts
+        if len(ts) >= maxi:
+            return int(fen - (now - ts[0])) + 1
+    return 0
+
+
+def _note_echec(user, ip):
+    with _ECHECS_LOCK:
+        _ECHECS.setdefault((user, ip), []).append(time.monotonic())
+
+
+def _reset_echecs(user, ip):
+    with _ECHECS_LOCK:
+        _ECHECS.pop((user, ip), None)
+
+
+def _decode_basic(h):
+    """En-tête Authorization -> (user, pwd) ou (None, None)."""
+    if not h.startswith("Basic "):
+        return None, None
+    try:
+        u, _, p = base64.b64decode(h[6:]).decode("utf-8").partition(":")
+        return u, p
+    except Exception:
+        return None, None
 
 
 def _now():
@@ -116,6 +204,9 @@ class Handler(BaseHTTPRequestHandler):
     server_version = "board/1.0"
 
     # --- utilitaires réponse ---
+    _CSP = ("default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; "
+            "connect-src 'self'; img-src 'none'; form-action 'none'; frame-ancestors 'none'")
+
     def _envoyer(self, code, corps, ctype="application/json"):
         data = corps if isinstance(corps, bytes) else json.dumps(
             corps, default=_json_default, ensure_ascii=False).encode("utf-8")
@@ -123,24 +214,11 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", ctype + "; charset=utf-8")
         self.send_header("Content-Length", str(len(data)))
         self.send_header("X-Content-Type-Options", "nosniff")
+        if ctype.startswith("text/html"):   # S4 : verrouille la page (pas d'exfil sortante)
+            self.send_header("Content-Security-Policy", self._CSP)
+            self.send_header("X-Frame-Options", "DENY")
         self.end_headers()
         self.wfile.write(data)
-
-    def _auth_user(self):
-        """Renvoie le compte authentifié, ou None. Comparaison TIMING-SAFE ; un pass
-        bidon est quand même comparé pour lisser le timing (anti-énumération)."""
-        h = self.headers.get("Authorization", "")
-        if not h.startswith("Basic "):
-            return None
-        try:
-            u, _, p = base64.b64decode(h[6:]).decode("utf-8").partition(":")
-        except Exception:
-            return None
-        attendu = COMPTES.get(u)
-        if attendu is None:
-            hmac.compare_digest(p or " ", " ")   # lisse le timing pour un user inconnu
-            return None
-        return u if hmac.compare_digest(p, attendu) else None
 
     def _exiger_auth(self):
         self.send_response(401)
@@ -148,13 +226,27 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def _garde(self):
-        """Login OBLIGATOIRE partout (board partagé). Renvoie le compte, ou None après
-        avoir déjà renvoyé 401."""
-        u = self._auth_user()
-        if not u:
+        """Login OBLIGATOIRE partout. Anti-bruteforce (429 avant toute comparaison) +
+        journal des échecs/blocages. Renvoie le compte, ou None après avoir répondu."""
+        ip = self.client_address[0]
+        user, pwd = _decode_basic(self.headers.get("Authorization", ""))
+        if user is None:
             self._exiger_auth()
             return None
-        return u
+        retry = _retry_si_bloque(user, ip)
+        if retry > 0:                                   # bloqué : PAS de comparaison de mdp
+            _journal("BLOCAGE user=%s ip=%s retry=%ds" % (user, ip, retry))
+            self.send_response(429)
+            self.send_header("Retry-After", str(retry))
+            self.end_headers()
+            return None
+        if _verifier(user, pwd):
+            _reset_echecs(user, ip)
+            return user
+        _note_echec(user, ip)
+        _journal("ECHEC_LOGIN user=%s ip=%s" % (user, ip))
+        self._exiger_auth()
+        return None
 
     def _csrf_ok(self):
         """Anti-CSRF : exige l'en-tête custom X-Board (impossible à poser depuis un
@@ -273,16 +365,42 @@ class Handler(BaseHTTPRequestHandler):
             leads.marquer(host, pattern, statut, body.get("note"), par=user)  # trace QUI
         except ValueError as e:
             return self._envoyer(400, {"erreur": str(e)})
+        _journal("STATUT par=%s ip=%s host=%s pattern=%s statut=%s"
+                 % (user, self.client_address[0], host, pattern, statut))
         return self._envoyer(200, {"ok": True, "host": host, "pattern": pattern,
                                    "statut": statut, "par": user})
 
 
+def _outil_hash():
+    """python engine/board.py --hash-pass : demande user+mot de passe (sans écho) et
+    imprime la ligne hachée à coller dans BOARD_ACCOUNTS."""
+    user = input("compte (nom d'utilisateur) : ").strip()
+    p1 = getpass.getpass("mot de passe : ")
+    p2 = getpass.getpass("confirme : ")
+    if not user or not p1:
+        sys.stderr.write("compte et mot de passe requis.\n")
+        return 2
+    if p1 != p2:
+        sys.stderr.write("les mots de passe diffèrent.\n")
+        return 2
+    print("\n# à coller dans BOARD_ACCOUNTS (.env) — séparer les comptes par des virgules :")
+    print("%s:%s" % (user, _fabriquer_hash(p1)))
+    return 0
+
+
 def main():
+    if "--hash-pass" in sys.argv[1:]:
+        return _outil_hash()
     if not COMPTES:
         sys.stderr.write("[board] REFUS de démarrer : aucun compte. Login OBLIGATOIRE "
-                         "(board partagé) -> BOARD_ACCOUNTS='alice:passA,bob:passB' "
-                         "(ou BOARD_USER/BOARD_PASS).\n")
+                         "(board partagé) -> BOARD_ACCOUNTS='alice:<hash>,bob:<hash>' "
+                         "(génère les hash : python engine/board.py --hash-pass).\n")
         return 2
+    for u, secret in COMPTES.items():   # rétro-compat : avertir si un mdp est en clair
+        if not _est_hache(secret):
+            sys.stderr.write("[board] AVERTISSEMENT : le compte '%s' a un mot de passe EN "
+                             "CLAIR dans l'environnement. Hache-le : python engine/board.py "
+                             "--hash-pass\n" % u)
     mode = "EXPOSÉ (0.0.0.0)" if EXPOSE else "localhost/tunnel"
     sys.stderr.write("[board] http://%s:%d — %s — login obligatoire, %d compte(s)\n"
                      % (BIND, PORT, mode, len(COMPTES)))

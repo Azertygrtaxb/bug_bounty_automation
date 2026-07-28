@@ -66,7 +66,7 @@
 </header>
 <div class="filters">
   score ≥ <input type="number" id="min_score" value="1" min="0">
-  <input type="text" id="host" placeholder="host (exact)">
+  <input type="text" id="host" placeholder="host (contient)">
   <input type="text" id="q" placeholder="recherche pattern/url">
   <select id="statut">
     <option value="">— statut —</option>
@@ -109,6 +109,14 @@ function params(){
   return p;
 }
 function esc(s){return (s==null?"":String(s)).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]))}
+// esc() échappe le HTML, pas le SCHÉMA : ne rendre un lien que pour http(s), sinon texte nu
+// (une URL javascript:/data: récoltée au crawl ne doit jamais être cliquable).
+function lien(u){
+  if(!u) return "";
+  return /^https?:\/\//i.test(u)
+    ? `<a class="url" href="${esc(u)}" target="_blank" rel="noopener noreferrer">${esc(u)}</a>`
+    : `<span class="url" title="schéma non http(s), non cliquable">${esc(u)}</span>`;
+}
 
 async function charger(){
   const st=await (await fetch("/api/stats")).json();
@@ -141,7 +149,7 @@ async function charger(){
       <td>${btns(r)}<input class="note" placeholder="note…" value="${esc(r.note)}"></td>
       <td>${esc(r.host)}</td>
       <td><span class="pat">${esc(r.pattern)}</span>${nouveau?' <span class="badge new">NOUVEAU</span>':''}
-          ${url?`<br><a class="url" href="${esc(url)}" target="_blank" rel="noopener noreferrer">${esc(url)}</a>`:""}</td>
+          ${url?"<br>"+lien(url):""}</td>
       <td class="k">${esc(r.http_status)}</td>
       <td class="tech">${esc((r.tech||[]).join(", "))}</td>
       <td class="reasons">${esc((r.raisons||[]).join(", "))}</td>`;
@@ -178,7 +186,7 @@ async function deplier(host,trRepli){
     tr.innerHTML=`<td class="sc">${r.score}</td><td class="nb">${r.nb??""}</td>
       <td>${btns(r)}<input class="note" placeholder="note…" value="${esc(r.note)}"></td>
       <td>${esc(r.host)}</td>
-      <td><span class="pat">${esc(r.pattern)}</span>${url?`<br><a class="url" href="${esc(url)}" target="_blank" rel="noopener noreferrer">${esc(url)}</a>`:""}</td>
+      <td><span class="pat">${esc(r.pattern)}</span>${url?"<br>"+lien(url):""}</td>
       <td class="k">${esc(r.http_status)}</td><td class="tech">${esc((r.tech||[]).join(", "))}</td>
       <td class="reasons">${esc((r.raisons||[]).join(", "))}</td>`;
     tr.querySelector(".pat").onclick=()=>detail(r.host,r.pattern);
@@ -191,7 +199,7 @@ async function detail(host,pattern){
   if(d.erreur){alert(d.erreur);return;}
   const hdr=d.response_headers?Object.entries(d.response_headers).map(([k,v])=>`${esc(k)}: ${esc(v)}`).join("\n"):"(aucun)";
   const membres=d.membres.map(m=>`<tr><td class="sc">${m.score}</td><td class="k">${esc(m.http_status)}</td>
-     <td><a class="url" href="${esc(m.url)}" target="_blank" rel="noopener noreferrer">${esc(m.url)}</a></td></tr>`).join("");
+     <td>${lien(m.url)}</td></tr>`).join("");
   $("drawer-body").innerHTML=`
     <span class="close" onclick="fermerDrawer()">fermer ✕</span>
     <h2>${esc(host)}</h2><div class="k">${esc(pattern)} — ${d.nb} membre(s)</div>

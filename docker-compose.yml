@@ -63,9 +63,11 @@ services:
       BOARD_PORT: "8080"
       BOARD_EXPOSE: "${BOARD_EXPOSE:-0}"     # 0=localhost/tunnel ; 1=0.0.0.0 (login déjà obligatoire)
       # Login OBLIGATOIRE (board partagé, ≥2 comptes). Vide -> le board refuse de démarrer.
-      BOARD_ACCOUNTS: "${BOARD_ACCOUNTS:-}"  # 'alice:passA,bob:passB'
+      BOARD_ACCOUNTS: "${BOARD_ACCOUNTS:-}"  # 'alice:pbkdf2$...,bob:pbkdf2$...' (hash via --hash-pass)
       BOARD_USER: "${BOARD_USER:-}"          # (legacy, compte unique optionnel)
       BOARD_PASS: "${BOARD_PASS:-}"
+      BOARD_MAX_ECHECS: "${BOARD_MAX_ECHECS:-5}"        # anti-bruteforce : échecs tolérés / (user,IP)
+      BOARD_FENETRE_ECHECS: "${BOARD_FENETRE_ECHECS:-300}"  # fenêtre (s) du compteur d'échecs
     ports:
       # 127.0.0.1 par défaut. Pour exposer : BOARD_BIND_HOST=0.0.0.0 + BOARD_EXPOSE=1 + creds.
       - "${BOARD_BIND_HOST:-127.0.0.1}:8080:8080"

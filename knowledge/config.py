@@ -116,6 +116,11 @@ PARAMS_PAGINATION = {
 # détail (jamais le corps entier dans la page). Éditable §14.
 EXTRAIT_CORPS_MAX = int(os.environ.get("EXTRAIT_CORPS_MAX", "2000"))
 
+# --- Anti-bruteforce du login board : au-delà de BOARD_MAX_ECHECS tentatives ratées par
+# (compte, IP) dans BOARD_FENETRE_ECHECS secondes -> 429, sans comparer le mot de passe.
+BOARD_MAX_ECHECS = int(os.environ.get("BOARD_MAX_ECHECS", "5"))
+BOARD_FENETRE_ECHECS = int(os.environ.get("BOARD_FENETRE_ECHECS", "300"))
+
 
 def deep_rank(score_shallow, tech, host, paths):
     """Renvoie (deep_rank:int, detail:dict). detail expose chaque composante pour

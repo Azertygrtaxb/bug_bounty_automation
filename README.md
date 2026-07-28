@@ -56,15 +56,27 @@ Accès machine (le collègue) : `GET /api/leads?min_score=6&quota=0` (avec auth)
 
 ### Login (obligatoire, board partagé à deux)
 Le board porte la carte d'attaque d'un périmètre bancaire : **login obligatoire partout**,
-il refuse de démarrer sans compte. Un compte par chasseur :
+il refuse de démarrer sans compte. Un compte par chasseur, **mot de passe haché** :
 
 ```bash
-BOARD_ACCOUNTS='alice:motdepasseA,bob:motdepasseB'   # dans .env, jamais committé
+# génère chaque compte (mot de passe saisi sans écho) :
+docker compose run --rm board python -m engine.board --hash-pass
+# -> imprime 'alice:pbkdf2$600000$…' ; colle les comptes séparés par des virgules :
+BOARD_ACCOUNTS='alice:pbkdf2$…,bob:pbkdf2$…'          # dans .env, jamais committé
 ```
 
-- Comparaison **timing-safe** (anti-énumération) ; POST protégé **CSRF** (en-tête custom
-  `X-Board` + `Origin` même hôte). Chaque statut trace **qui** l'a posé (`par_qui`, visible
-  dans l'UI et l'API).
+Un mot de passe **en clair** reste accepté (rétro-compat) mais le serveur **avertit** au
+démarrage en nommant le compte. On hache non pas contre un VPS compromis (qui a la base a
+tout) mais contre la **réutilisation** du mot de passe ailleurs.
+
+- Comparaison **timing-safe** (pbkdf2 + `compare_digest`, anti-énumération).
+- **Anti-bruteforce** : au-delà de `BOARD_MAX_ECHECS` (5) échecs par (compte, IP) en
+  `BOARD_FENETRE_ECHECS` (300 s) -> `429 Retry-After`, sans comparer le mot de passe.
+- **CSRF** : POST exige l'en-tête custom `X-Board` + `Origin` même hôte. **Journal** stderr :
+  échecs de login, blocages, et chaque POST (qui/quel lead/quel statut) — jamais le mot de
+  passe ni le corps. Chaque statut trace **qui** (`par_qui`, UI + API).
+- **En-têtes** sur la page : `Content-Security-Policy` (aucune connexion/image sortante) +
+  `X-Frame-Options: DENY`.
 - `BOARD_EXPOSE=0` (défaut) : bind publié sur 127.0.0.1 (tunnel SSH). `BOARD_EXPOSE=1` +
   `BOARD_BIND_HOST=0.0.0.0` pour exposer — préfère le tunnel (HTTP clair = identifiants ET
   cibles à nu). Le login reste obligatoire dans les deux cas.
