@@ -205,15 +205,17 @@ def _assurer_table(cur):
         "CREATE TABLE IF NOT EXISTS leads ("
         " host TEXT NOT NULL, pattern TEXT NOT NULL, url_representative TEXT,"
         " score INTEGER, raisons TEXT[], nb INTEGER, http_status INTEGER,"
-        " tech TEXT[], in_scope BOOLEAN, updated_at TIMESTAMPTZ DEFAULT now(),"
-        " PRIMARY KEY (host, pattern))")
+        " tech TEXT[], in_scope BOOLEAN, premiere_vue TIMESTAMPTZ,"
+        " updated_at TIMESTAMPTZ DEFAULT now(), PRIMARY KEY (host, pattern))")
+    cur.execute("ALTER TABLE leads ADD COLUMN IF NOT EXISTS premiere_vue TIMESTAMPTZ")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_leads_score ON leads (score DESC)")
     cur.execute(
         "CREATE TABLE IF NOT EXISTS leads_statut ("
         " host TEXT NOT NULL, pattern TEXT NOT NULL, statut TEXT DEFAULT 'a_voir',"
-        " note TEXT, orphelin BOOLEAN DEFAULT false, updated_at TIMESTAMPTZ DEFAULT now(),"
-        " PRIMARY KEY (host, pattern))")
+        " note TEXT, ancre_url TEXT, orphelin BOOLEAN DEFAULT false,"
+        " updated_at TIMESTAMPTZ DEFAULT now(), PRIMARY KEY (host, pattern))")
     cur.execute("ALTER TABLE leads_statut ADD COLUMN IF NOT EXISTS orphelin BOOLEAN DEFAULT false")
+    cur.execute("ALTER TABLE leads_statut ADD COLUMN IF NOT EXISTS ancre_url TEXT")
 
 
 def construire(seuil=1):
@@ -226,7 +228,7 @@ def construire(seuil=1):
     with psycopg.connect(DATABASE_URL) as conn:
         with conn.cursor() as cur:
             cur.execute("SELECT id, host, url, score, COALESCE(score_raisons,'{}'), "
-                        "http_status, COALESCE(tech,'{}'), COALESCE(tags,'{}') "
+                        "http_status, COALESCE(tech,'{}'), COALESCE(tags,'{}'), cree_le "
                         "FROM targets WHERE score >= %s", (seuil,))
             rows = cur.fetchall()
 
@@ -235,7 +237,7 @@ def construire(seuil=1):
             # liste lancée (OU marque hors_cible si présente). Scope vide -> fail-open.
             roots = scope.charger_roots()
             gardes, exclus_hc = [], 0
-            for rid, host, url, score, raisons, http_status, tech, tags in rows:
+            for rid, host, url, score, raisons, http_status, tech, tags, cree_le in rows:
                 marque = "hors_cible_de_lancement" in ",".join(raisons)
                 dehors = scope.hors_scope(host, roots) or marque
                 if not config.INCLURE_HORS_SCOPE and dehors:
@@ -244,7 +246,7 @@ def construire(seuil=1):
                 gardes.append({"id": rid, "host": host, "url": url, "score": score,
                                "raisons": list(raisons or []), "http_status": http_status,
                                "tech": list(tech or []), "tags": tags,
-                               "in_scope": not dehors})
+                               "in_scope": not dehors, "cree_le": cree_le})
             apres_1b = len(gardes)
 
             # 1c — patternize + stockage tags.lead_pattern
@@ -265,14 +267,17 @@ def construire(seuil=1):
                     profil[key] = p
             # collapse généralisé (B1 segment-avant-id + B2 homogénéité de profil)
             remap = _collapse_freres({(g["host"], g["pattern"]) for g in gardes}, profil)
-            groupes = {}  # (host, pattern_final) -> {nb, score_max, representant}
+            groupes = {}  # (host, pattern_final) -> {nb, score_max, representant, premiere_vue}
             for g in gardes:
                 pat = remap.get((g["host"], g["pattern"]), g["pattern"])
                 key = (g["host"], pat)
-                grp = groupes.setdefault(key, {"nb": 0, "score": -1, "rep": None})
+                grp = groupes.setdefault(key, {"nb": 0, "score": -1, "rep": None, "premiere_vue": None})
                 grp["nb"] += 1
                 if g["score"] > grp["score"]:
                     grp["score"] = g["score"]; grp["rep"] = g
+                cv = g["cree_le"]
+                if cv is not None and (grp["premiere_vue"] is None or cv < grp["premiere_vue"]):
+                    grp["premiere_vue"] = cv    # R1 : MIN(cree_le) sur les membres = première-vue
         conn.commit()
 
     lignes = []
@@ -281,7 +286,7 @@ def construire(seuil=1):
         lignes.append({"host": host, "pattern": pat, "url_representative": rep["url"],
                        "score": grp["score"], "raisons": rep["raisons"], "nb": grp["nb"],
                        "http_status": rep["http_status"], "tech": rep["tech"],
-                       "in_scope": rep["in_scope"]})
+                       "in_scope": rep["in_scope"], "premiere_vue": grp["premiere_vue"]})
     lignes.sort(key=lambda x: (x["score"], x["nb"]), reverse=True)
     # remap {(host, pattern_avant_collapse): pattern_apres} pour migrer les statuts.
     return lignes, {"brut": brut, "apres_1b": apres_1b, "exclus_hors_cible": exclus_hc,
@@ -345,11 +350,55 @@ def _marquer_orphelins(cur):
                 "(SELECT 1 FROM leads l WHERE l.host = s.host AND l.pattern = s.pattern)")
 
 
+def _reconcilier_ancres(cur):
+    """LOT 0 (0.3) — réconciliation par ANCRE, sens replié->dé-replié que remap ne couvre
+    pas. Pour chaque statut dont la clé (host,pattern) n'existe plus dans `leads` mais dont
+    l'ancre_url existe encore dans `targets`, on lit tags.lead_pattern (écrit par construire)
+    de cette URL et on DÉPLACE le statut dessus. Collision -> ORDRE_STATUT + notes
+    concaténées. Reste orphelin seulement si l'ancre a disparu de `targets`. À appeler APRÈS
+    la réécriture de `leads`, AVANT _marquer_orphelins."""
+    cur.execute("SELECT s.host, s.pattern, s.ancre_url, s.statut, s.note FROM leads_statut s "
+                "WHERE s.ancre_url IS NOT NULL AND NOT EXISTS "
+                "(SELECT 1 FROM leads l WHERE l.host = s.host AND l.pattern = s.pattern)")
+    perdus = cur.fetchall()
+    deplaces = 0
+    for old_host, old_pat, ancre, statut, note in perdus:
+        cur.execute("SELECT host, tags->>'lead_pattern' FROM targets WHERE url = %s LIMIT 1", (ancre,))
+        row = cur.fetchone()
+        if not row or not row[1]:
+            continue  # ancre disparue de targets -> reste orphelin
+        new_host, new_pat = row[0], row[1]
+        if (new_host, new_pat) == (old_host, old_pat):
+            continue
+        cur.execute("SELECT 1 FROM leads WHERE host = %s AND pattern = %s", (new_host, new_pat))
+        if not cur.fetchone():
+            continue  # la cible n'est pas un lead courant -> reste orphelin
+        cur.execute("SELECT statut, note FROM leads_statut WHERE host = %s AND pattern = %s",
+                    (new_host, new_pat))
+        ex = cur.fetchone()
+        best, notes = statut, ([note] if note else [])
+        if ex:
+            if _rang_statut(ex[0]) >= _rang_statut(best):
+                best = ex[0]
+            if ex[1] and ex[1] not in notes:
+                notes.append(ex[1])
+        merged = " | ".join(notes) if notes else None
+        cur.execute(
+            "INSERT INTO leads_statut (host, pattern, statut, note, ancre_url, orphelin, updated_at) "
+            "VALUES (%s, %s, %s, %s, %s, false, now()) ON CONFLICT (host, pattern) DO UPDATE "
+            "SET statut = EXCLUDED.statut, note = EXCLUDED.note, "
+            "ancre_url = COALESCE(leads_statut.ancre_url, EXCLUDED.ancre_url), "
+            "orphelin = false, updated_at = now()", (new_host, new_pat, best, merged, ancre))
+        cur.execute("DELETE FROM leads_statut WHERE host = %s AND pattern = %s", (old_host, old_pat))
+        deplaces += 1
+    return deplaces
+
+
 def persister(lignes, remap=None):
     """Remplace TOUT le contenu de `leads` par `lignes`. GARDE-FOU (A4) : liste VIDE ->
     on NE truncate PAS (un rebuild raté ne doit jamais vider le board), on avertit et on
-    sort. AVANT la réécriture, migre les statuts à travers `remap` (A2) ; APRÈS, marque
-    les statuts orphelins (A3). `leads_statut` n'est jamais truncatée."""
+    sort. Ordre : _migrer_statut(remap) AVANT réécriture ; _reconcilier_ancres +
+    _marquer_orphelins APRÈS. `leads_statut` n'est jamais truncatée."""
     if not lignes:
         sys.stderr.write("[leads] AVERTISSEMENT : rebuild VIDE -> table `leads` NON "
                          "touchée (garde-fou A4).\n")
@@ -358,13 +407,14 @@ def persister(lignes, remap=None):
         with conn.cursor() as cur:
             _assurer_table(cur)
             if remap:
-                _migrer_statut(cur, remap)
+                _migrer_statut(cur, remap)               # repli -> replié (patterns bruts)
             cur.execute("TRUNCATE leads")
             cur.executemany(
                 "INSERT INTO leads (host, pattern, url_representative, score, raisons, "
-                "nb, http_status, tech, in_scope, updated_at) VALUES "
+                "nb, http_status, tech, in_scope, premiere_vue, updated_at) VALUES "
                 "(%(host)s, %(pattern)s, %(url_representative)s, %(score)s, %(raisons)s, "
-                "%(nb)s, %(http_status)s, %(tech)s, %(in_scope)s, now())", lignes)
+                "%(nb)s, %(http_status)s, %(tech)s, %(in_scope)s, %(premiere_vue)s, now())", lignes)
+            _reconcilier_ancres(cur)                     # replié -> dé-replié (via ancre_url)
             _marquer_orphelins(cur)
         conn.commit()
     return len(lignes)
@@ -373,25 +423,31 @@ def persister(lignes, remap=None):
 def lister_orphelins():
     """Statuts dont la clé n'existe plus dans `leads` (travail humain à re-router)."""
     with psycopg.connect(DATABASE_URL) as conn, conn.cursor() as cur:
-        cur.execute("SELECT host, pattern, statut, note FROM leads_statut "
+        cur.execute("SELECT host, pattern, statut, note, ancre_url FROM leads_statut "
                     "WHERE orphelin ORDER BY host, pattern")
-        return [{"host": h, "pattern": p, "statut": s, "note": n}
-                for h, p, s, n in cur.fetchall()]
+        return [{"host": h, "pattern": p, "statut": s, "note": n, "ancre_url": a}
+                for h, p, s, n, a in cur.fetchall()]
 
 
-def marquer(host, pattern, statut, note=None):
-    """UPSERT du statut de triage HUMAIN dans leads_statut (jamais truncatée). Refuse un
-    statut hors config.STATUTS_LEAD. note=None conserve la note existante."""
+def marquer(host, pattern, statut, note=None, ancre_url=None):
+    """UPSERT du statut de triage HUMAIN. Refuse un statut hors STATUTS_LEAD. note=None
+    conserve la note existante. ancre_url manquante -> remplie avec le url_representative
+    du lead visé (l'URL réelle que l'humain regardait). AUCUN DDL : compatible avec un
+    rôle postgres SELECT + INSERT/UPDATE sur leads_statut (le board tourne ainsi)."""
     if statut not in config.STATUTS_LEAD:
         raise ValueError("statut %r invalide (attendus: %s)" % (statut, config.STATUTS_LEAD))
     with psycopg.connect(DATABASE_URL) as conn, conn.cursor() as cur:
-        _assurer_table(cur)
+        if ancre_url is None:
+            cur.execute("SELECT url_representative FROM leads WHERE host = %s AND pattern = %s",
+                        (host, pattern))
+            row = cur.fetchone()
+            ancre_url = row[0] if row else None
         cur.execute(
-            "INSERT INTO leads_statut (host, pattern, statut, note, updated_at) "
-            "VALUES (%s, %s, %s, %s, now()) ON CONFLICT (host, pattern) DO UPDATE SET "
-            "statut = EXCLUDED.statut, "
-            "note = COALESCE(EXCLUDED.note, leads_statut.note), updated_at = now()",
-            (host, pattern, statut, note))
+            "INSERT INTO leads_statut (host, pattern, statut, note, ancre_url, updated_at) "
+            "VALUES (%s, %s, %s, %s, %s, now()) ON CONFLICT (host, pattern) DO UPDATE SET "
+            "statut = EXCLUDED.statut, note = COALESCE(EXCLUDED.note, leads_statut.note), "
+            "ancre_url = COALESCE(EXCLUDED.ancre_url, leads_statut.ancre_url), updated_at = now()",
+            (host, pattern, statut, note, ancre_url))
         conn.commit()
     return True
 
@@ -416,7 +472,7 @@ def _appliquer_quota(rows):
                         "url_representative": None, "score": reste[0]["score"],
                         "raisons": ["quota_host(%d masqués)" % len(reste)], "nb": None,
                         "http_status": None, "tech": [], "in_scope": True,
-                        "statut": "-", "note": None, "type": "repli"})
+                        "premiere_vue": None, "statut": "-", "note": None, "type": "repli"})
     out.sort(key=lambda x: (x["score"], x["nb"] or 0), reverse=True)
     return out
 
@@ -425,10 +481,10 @@ def lire(seuil=1, quota=True):
     """Lit `leads` (source de vérité) + LEFT JOIN leads_statut (statut/​note, défaut
     'a_voir') — AUCUN recalcul, AUCUN DDL (C1 : lecture 100% read-only, compatible user
     postgres restreint). `quota=False` -> liste brute sans repli (C2, pour API/export
-    machine). Chaque ligne porte `type` = 'lead' | 'repli' (C3)."""
+    machine). Chaque ligne porte `type` = 'lead' | 'repli' (C3) + `premiere_vue` (R1)."""
     with psycopg.connect(DATABASE_URL) as conn, conn.cursor() as cur:
         cur.execute("SELECT l.host, l.pattern, l.url_representative, l.score, l.raisons, "
-                    "l.nb, l.http_status, l.tech, l.in_scope, "
+                    "l.nb, l.http_status, l.tech, l.in_scope, l.premiere_vue, "
                     "COALESCE(s.statut, %s) AS statut, s.note "
                     "FROM leads l LEFT JOIN leads_statut s "
                     "  ON s.host = l.host AND s.pattern = l.pattern "
@@ -437,6 +493,34 @@ def lire(seuil=1, quota=True):
         cols = [d[0] for d in cur.description]
         rows = [dict(zip(cols, r), type="lead") for r in cur.fetchall()]
     return _appliquer_quota(rows) if quota else rows
+
+
+def detail(host, pattern):
+    """R2 — détail LECTURE SEULE d'un lead (replié ou non) pour le panneau latéral :
+    les MEMBRES réels du groupe (url/score/http_status), les raisons + response_headers du
+    représentant, et un EXTRAIT borné de body_text. Aucun DDL. Regroupe par
+    tags.lead_pattern = `pattern` sur le host (ce que construire a écrit)."""
+    with psycopg.connect(DATABASE_URL) as conn, conn.cursor() as cur:
+        cur.execute(
+            "SELECT url, score, http_status, COALESCE(score_raisons,'{}'), "
+            "response_headers, body_text FROM targets "
+            "WHERE host = %s AND tags->>'lead_pattern' = %s ORDER BY score DESC, url",
+            (host, pattern))
+        rows = cur.fetchall()
+    membres = [{"url": u, "score": sc, "http_status": st} for (u, sc, st, _, _, _) in rows]
+    rep = rows[0] if rows else None
+    extrait = None
+    if rep and rep[5]:
+        extrait = rep[5][:config.EXTRAIT_CORPS_MAX]
+    return {
+        "host": host, "pattern": pattern, "nb": len(membres),
+        "representant": rep[0] if rep else None,
+        "raisons": list(rep[3]) if rep else [],
+        "response_headers": rep[4] if rep else None,
+        "body_extrait": extrait,
+        "body_tronque": bool(rep and rep[5] and len(rep[5]) > config.EXTRAIT_CORPS_MAX),
+        "membres": membres,
+    }
 
 
 def main(argv):

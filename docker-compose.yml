@@ -47,5 +47,29 @@ services:
       redis:
         condition: service_started
 
+  # --- Dashboard de chasse (Tier 4) : LIT leads, ÉCRIT leads_statut. Réutilise l'image
+  # worker (mêmes deps, aucun build front). Publié sur 127.0.0.1 UNIQUEMENT par défaut :
+  # accès via tunnel SSH (ssh -L 8080:localhost:8080 root@<vps>). Le board porte la carte
+  # d'attaque d'un périmètre bancaire -> pas d'IP publique en clair sans raison.
+  board:
+    build:
+      context: .
+      dockerfile: engine/Dockerfile
+    command: ["python", "-m", "engine.board"]
+    environment:
+      # Rôle SELECT-only sur targets/leads + INSERT/UPDATE sur leads_statut (voir README).
+      # À défaut de rôle dédié, retombe sur le compte applicatif.
+      DATABASE_URL: postgresql://${BOARD_DB_USER:-${POSTGRES_USER}}:${BOARD_DB_PASS:-${POSTGRES_PASSWORD}}@postgres:5432/${POSTGRES_DB}
+      BOARD_PORT: "8080"
+      BOARD_EXPOSE: "${BOARD_EXPOSE:-0}"     # 0=localhost/tunnel ; 1=0.0.0.0 + basic-auth OBLIGATOIRE
+      BOARD_USER: "${BOARD_USER:-}"
+      BOARD_PASS: "${BOARD_PASS:-}"
+    ports:
+      # 127.0.0.1 par défaut. Pour exposer : BOARD_BIND_HOST=0.0.0.0 + BOARD_EXPOSE=1 + creds.
+      - "${BOARD_BIND_HOST:-127.0.0.1}:8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
 volumes:
   pgdata:

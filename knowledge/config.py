@@ -112,6 +112,10 @@ PARAMS_PAGINATION = {
     "per_page", "from", "size", "num",
 }
 
+# --- Dashboard (Tier 4) : longueur max de l'EXTRAIT de corps montré dans le panneau de
+# détail (jamais le corps entier dans la page). Éditable §14.
+EXTRAIT_CORPS_MAX = int(os.environ.get("EXTRAIT_CORPS_MAX", "2000"))
+
 
 def deep_rank(score_shallow, tech, host, paths):
     """Renvoie (deep_rank:int, detail:dict). detail expose chaque composante pour

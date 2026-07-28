@@ -1,0 +1,215 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>🎯 Lead Board</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🎯</text></svg>">
+<style>
+  :root{
+    --bg:#0d1117; --panel:#161b22; --panel2:#1c2230; --border:#2a3240; --fg:#e6edf3;
+    --mut:#8b98a5; --acc:#e3b341; --link:#58a6ff;
+    --avoir:#8b98a5; --encours:#58a6ff; --tue:#f85149; --rapporte:#3fb950; --new:#a371f7;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--fg);font:13px/1.45 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+  header{padding:10px 14px;border-bottom:1px solid var(--border);display:flex;gap:14px;align-items:center;flex-wrap:wrap;position:sticky;top:0;background:var(--bg);z-index:5}
+  h1{font-size:15px;margin:0;color:var(--acc)}
+  .stats{color:var(--mut);font-size:12px}
+  .stats b{color:var(--fg)}
+  .filters{display:flex;gap:8px;flex-wrap:wrap;align-items:center;padding:8px 14px;border-bottom:1px solid var(--border);background:var(--panel)}
+  input,select,button{font:inherit}
+  input,select{background:var(--panel2);color:var(--fg);border:1px solid var(--border);border-radius:5px;padding:4px 7px}
+  input[type=number]{width:72px}
+  .chip{background:var(--panel2);border:1px solid var(--border);color:var(--mut);border-radius:5px;padding:4px 9px;cursor:pointer}
+  .chip.on{border-color:var(--acc);color:var(--acc)}
+  table{width:100%;border-collapse:collapse}
+  th,td{text-align:left;padding:5px 8px;border-bottom:1px solid var(--border);vertical-align:top}
+  th{position:sticky;top:0;color:var(--mut);font-weight:600;background:var(--panel);font-size:11px;text-transform:uppercase;letter-spacing:.04em}
+  tr:hover td{background:#12171f}
+  td.sc{color:var(--acc);font-weight:700;text-align:right}
+  td.nb{color:var(--mut);text-align:right}
+  .pat{color:var(--fg);cursor:pointer;text-decoration:underline dotted var(--border)}
+  .pat:hover{text-decoration-color:var(--acc)}
+  a.url{color:var(--link);text-decoration:none}
+  a.url:hover{text-decoration:underline}
+  .reasons{color:var(--mut);font-size:11px}
+  .tech{color:var(--mut);font-size:11px}
+  .badge{display:inline-block;padding:0 6px;border-radius:9px;font-size:10px;font-weight:700;border:1px solid}
+  .badge.new{color:var(--new);border-color:var(--new)}
+  .st-btns{display:flex;gap:3px;margin-bottom:3px}
+  .st-btns b{padding:2px 6px;border:1px solid var(--border);border-radius:5px;cursor:pointer;font-weight:600;color:var(--mut);font-size:11px}
+  .st-btns b.sel[data-s=a_voir]{color:var(--avoir);border-color:var(--avoir)}
+  .st-btns b.sel[data-s=en_cours]{color:var(--encours);border-color:var(--encours)}
+  .st-btns b.sel[data-s=tue]{color:var(--tue);border-color:var(--tue)}
+  .st-btns b.sel[data-s=rapporte]{color:var(--rapporte);border-color:var(--rapporte)}
+  .note{width:100%;background:var(--bg);border:1px solid var(--border);color:var(--mut);border-radius:4px;padding:2px 5px;font-size:11px}
+  tr.tue td{opacity:.5}
+  tr.repli td{background:#141a24;color:var(--mut);cursor:pointer;font-style:italic}
+  tr.repli:hover td{background:#1a2130}
+  #orph{padding:8px 14px;background:#2d1418;border-bottom:1px solid var(--tue);color:#ffb4ab;font-size:12px;display:none}
+  #drawer{position:fixed;top:0;right:0;width:min(560px,92vw);height:100vh;background:var(--panel);border-left:1px solid var(--border);transform:translateX(100%);transition:transform .15s;overflow:auto;z-index:20;padding:14px}
+  #drawer.open{transform:none}
+  #drawer h2{font-size:14px;color:var(--acc);margin:.2em 0}
+  #drawer pre{white-space:pre-wrap;word-break:break-word;background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:8px;max-height:40vh;overflow:auto;font-size:11px}
+  #drawer .close{float:right;cursor:pointer;color:var(--mut);border:1px solid var(--border);border-radius:5px;padding:2px 8px}
+  #drawer table{margin:6px 0}
+  .k{color:var(--mut)}
+  .empty{padding:30px;text-align:center;color:var(--mut)}
+</style>
+</head>
+<body>
+<header>
+  <h1>🎯 Lead Board</h1>
+  <span class="stats" id="stats">…</span>
+</header>
+<div class="filters">
+  score ≥ <input type="number" id="min_score" value="1" min="0">
+  <input type="text" id="host" placeholder="host (exact)">
+  <input type="text" id="q" placeholder="recherche pattern/url">
+  <select id="statut">
+    <option value="">— statut —</option>
+    <option value="a_voir">a_voir</option>
+    <option value="en_cours">en_cours</option>
+    <option value="tue">tue</option>
+    <option value="rapporte">rapporte</option>
+  </select>
+  <select id="in_scope"><option value="">scope: tous</option><option value="1">in-scope</option><option value="0">hors-scope</option></select>
+  <span class="chip" data-depuis="" id="d-all">tout</span>
+  <span class="chip" data-depuis="24h">depuis hier</span>
+  <span class="chip" data-depuis="7j">7 jours</span>
+  <label style="color:var(--mut)"><input type="checkbox" id="quota" checked> quota</label>
+</div>
+<div id="orph"></div>
+<table id="tbl">
+  <thead><tr>
+    <th>score</th><th>nb</th><th>statut / note</th><th>host</th><th>pattern</th>
+    <th>http</th><th>tech</th><th>raisons</th>
+  </tr></thead>
+  <tbody id="rows"></tbody>
+</table>
+<div class="empty" id="empty" style="display:none">aucun lead pour ces filtres</div>
+<div id="drawer"><span class="close" onclick="fermerDrawer()">fermer ✕</span><div id="drawer-body"></div></div>
+
+<script>
+const STATUTS=["a_voir","en_cours","tue","rapporte"];
+const $=id=>document.getElementById(id);
+let depuis="";
+
+function params(){
+  const p=new URLSearchParams();
+  p.set("min_score",$("min_score").value||"1");
+  if($("host").value)p.set("host",$("host").value.trim());
+  if($("q").value)p.set("q",$("q").value.trim());
+  if($("statut").value)p.set("statut",$("statut").value);
+  if($("in_scope").value)p.set("in_scope",$("in_scope").value);
+  if(depuis)p.set("nouveaux_depuis",depuis);
+  p.set("quota",$("quota").checked?"1":"0");
+  return p;
+}
+function esc(s){return (s==null?"":String(s)).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]))}
+
+async function charger(){
+  const st=await (await fetch("/api/stats")).json();
+  $("stats").innerHTML=`<b>${st.total}</b> leads · nouveaux <b>${st.nouveaux_24h}</b>/24h <b>${st.nouveaux_7j}</b>/7j · `+
+    Object.entries(st.par_statut).map(([k,v])=>`${k}:<b>${v}</b>`).join(" · ");
+  const o=await (await fetch("/api/orphelins")).json();
+  if(o.count>0){$("orph").style.display="block";
+    $("orph").innerHTML=`⚠ ${o.count} statut(s) ORPHELIN(S) (jamais supprimés) : `+
+      o.orphelins.map(x=>`<code>[${esc(x.statut)}] ${esc(x.host)} ${esc(x.pattern)}</code>`).join(" — ");
+  } else $("orph").style.display="none";
+
+  const d=await (await fetch("/api/leads?"+params())).json();
+  const tb=$("rows");tb.innerHTML="";
+  $("empty").style.display=d.count?"none":"block";
+  const now=Date.now();
+  for(const r of d.leads){
+    const tr=document.createElement("tr");
+    if(r.type==="repli"){
+      tr.className="repli";
+      tr.innerHTML=`<td class="sc">${r.score}</td><td></td><td colspan="6">▸ ${esc(r.pattern)} sur <b>${esc(r.host)}</b> — cliquer pour déplier</td>`;
+      tr.onclick=()=>deplier(r.host,tr);
+      tb.appendChild(tr);continue;
+    }
+    if(r.statut==="tue")tr.className="tue";
+    const nouveau = r.premiere_vue && (now-Date.parse(r.premiere_vue) < 24*3600*1000);
+    const url=r.url_representative;
+    tr.innerHTML=`
+      <td class="sc">${r.score}</td>
+      <td class="nb">${r.nb??""}</td>
+      <td>${btns(r)}<input class="note" placeholder="note…" value="${esc(r.note)}"></td>
+      <td>${esc(r.host)}</td>
+      <td><span class="pat">${esc(r.pattern)}</span>${nouveau?' <span class="badge new">NOUVEAU</span>':''}
+          ${url?`<br><a class="url" href="${esc(url)}" target="_blank" rel="noopener noreferrer">${esc(url)}</a>`:""}</td>
+      <td class="k">${esc(r.http_status)}</td>
+      <td class="tech">${esc((r.tech||[]).join(", "))}</td>
+      <td class="reasons">${esc((r.raisons||[]).join(", "))}</td>`;
+    tr.querySelector(".pat").onclick=()=>detail(r.host,r.pattern);
+    wireBtns(tr,r);
+    tb.appendChild(tr);
+  }
+}
+function btns(r){
+  return `<div class="st-btns">`+STATUTS.map(s=>`<b data-s="${s}" class="${r.statut===s?'sel':''}">${s}</b>`).join("")+`</div>`;
+}
+function wireBtns(tr,r){
+  const note=tr.querySelector(".note");
+  tr.querySelectorAll(".st-btns b").forEach(b=>b.onclick=async()=>{
+    const s=b.dataset.s;
+    const res=await fetch("/api/leads/statut",{method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({host:r.host,pattern:r.pattern,statut:s,note:note.value||null})});
+    if(!res.ok){alert("statut refusé: "+(await res.json()).erreur);return;}
+    r.statut=s;
+    tr.querySelectorAll(".st-btns b").forEach(x=>x.classList.toggle("sel",x.dataset.s===s));
+    tr.classList.toggle("tue",s==="tue");
+  });
+}
+async function deplier(host,trRepli){
+  const d=await (await fetch("/api/leads/masques?host="+encodeURIComponent(host))).json();
+  const frag=document.createDocumentFragment();
+  for(const r of d.masques){
+    const tr=document.createElement("tr");if(r.statut==="tue")tr.className="tue";
+    const url=r.url_representative;
+    tr.innerHTML=`<td class="sc">${r.score}</td><td class="nb">${r.nb??""}</td>
+      <td>${btns(r)}<input class="note" placeholder="note…" value="${esc(r.note)}"></td>
+      <td>${esc(r.host)}</td>
+      <td><span class="pat">${esc(r.pattern)}</span>${url?`<br><a class="url" href="${esc(url)}" target="_blank" rel="noopener noreferrer">${esc(url)}</a>`:""}</td>
+      <td class="k">${esc(r.http_status)}</td><td class="tech">${esc((r.tech||[]).join(", "))}</td>
+      <td class="reasons">${esc((r.raisons||[]).join(", "))}</td>`;
+    tr.querySelector(".pat").onclick=()=>detail(r.host,r.pattern);
+    wireBtns(tr,r);frag.appendChild(tr);
+  }
+  trRepli.after(frag);trRepli.remove();
+}
+async function detail(host,pattern){
+  const d=await (await fetch(`/api/lead/detail?host=${encodeURIComponent(host)}&pattern=${encodeURIComponent(pattern)}`)).json();
+  if(d.erreur){alert(d.erreur);return;}
+  const hdr=d.response_headers?Object.entries(d.response_headers).map(([k,v])=>`${esc(k)}: ${esc(v)}`).join("\n"):"(aucun)";
+  const membres=d.membres.map(m=>`<tr><td class="sc">${m.score}</td><td class="k">${esc(m.http_status)}</td>
+     <td><a class="url" href="${esc(m.url)}" target="_blank" rel="noopener noreferrer">${esc(m.url)}</a></td></tr>`).join("");
+  $("drawer-body").innerHTML=`
+    <span class="close" onclick="fermerDrawer()">fermer ✕</span>
+    <h2>${esc(host)}</h2><div class="k">${esc(pattern)} — ${d.nb} membre(s)</div>
+    <h2>raisons du représentant</h2><div class="reasons">${esc((d.raisons||[]).join(", "))||"—"}</div>
+    <h2>membres réels (${d.nb})</h2><table>${membres||'<tr><td class="k">—</td></tr>'}</table>
+    <h2>response headers</h2><pre>${hdr}</pre>
+    <h2>extrait corps${d.body_tronque?" (tronqué)":""}</h2><pre>${esc(d.body_extrait)||"(vide / non capturé)"}</pre>`;
+  $("drawer").classList.add("open");
+}
+function fermerDrawer(){$("drawer").classList.remove("open")}
+
+document.querySelectorAll(".chip").forEach(c=>c.onclick=()=>{
+  depuis=c.dataset.depuis;
+  document.querySelectorAll(".chip").forEach(x=>x.classList.toggle("on",x===c));
+  charger();
+});
+$("d-all").classList.add("on");
+["min_score","host","q","statut","in_scope","quota"].forEach(id=>{
+  const el=$(id);el.addEventListener(el.tagName==="INPUT"&&el.type==="text"?"input":"change",()=>{
+    clearTimeout(window._t);window._t=setTimeout(charger,180);
+  });
+});
+charger();
+</script>
+</body>
+</html>
