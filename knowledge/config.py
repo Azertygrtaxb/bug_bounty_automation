@@ -95,6 +95,11 @@ MAX_LEADS_PAR_HOST = int(os.environ.get("MAX_LEADS_PAR_HOST", "5"))
 TIMEOUT_PAR_TACHE = int(os.environ.get("TIMEOUT_PAR_TACHE", "20"))  # s alloués par tâche
 TIMEOUT_MIN = int(os.environ.get("TIMEOUT_MIN", "2400"))            # plancher (s)
 PROGRESS_SECS = int(os.environ.get("PROGRESS_SECS", "60"))          # cadence des lignes de progression
+# Agrégation (score_targets / rebuild_leads) : plancher + terme ∝ nombre de lignes de targets.
+TIMEOUT_AGREGATION_MIN = int(os.environ.get("TIMEOUT_AGREGATION_MIN", "1800"))
+TIMEOUT_AGREGATION_PAR_1000 = int(os.environ.get("TIMEOUT_AGREGATION_PAR_1000", "20"))  # s / 1000 lignes
+# Sortie bornée : n'imprime que le top N du classement ; listes complètes -> fichier.
+AFFICHAGE_RANG_MAX = int(os.environ.get("AFFICHAGE_RANG_MAX", "40"))
 
 # --- Ordre d'avancement d'un statut (dernier = le plus avancé). Sert à résoudre une
 # COLLISION quand deux leads statutés se replient sur le même pattern : le plus avancé
