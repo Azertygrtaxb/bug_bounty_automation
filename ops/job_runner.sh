@@ -130,6 +130,19 @@ valide_host() {
 dans() { local x=$1; shift; for v in "$@"; do [[ "$x" == "$v" ]] && return 0; done; return 1; }
 entier_entre() { [[ "$1" =~ ^[0-9]+$ ]] && (( $1 >= $2 && $1 <= $3 )); }
 
+# L'index unique de bb_jobs empêche deux jobs simultanés sur la même cible, mais il ne
+# voit RIEN de ce qui a été lancé à la main en SSH. Or les deux écrivent dans le même
+# out/<host>/ : deux chasses s'écraseraient mutuellement journal.md et findings/, deux
+# recons se corrompraient leurs artefacts. On regarde donc les processus réels.
+deja_en_cours() {
+    local phase=$1 host=$2
+    case "$phase" in
+        recon) pgrep -af 'recon\.sh'  2>/dev/null | grep -qF " $host" ;;
+        hunt)  pgrep -af 'claude'     2>/dev/null | grep -qF "/out/$host" ;;
+        *)     return 1 ;;
+    esac
+}
+
 # ═════════════════════════════════════════════════ MODE EXÉCUTION D'UN JOB ══
 # Lancé par la boucle via `setsid` : ce processus est chef de son groupe, donc $$
 # vaut le PGID. On l'écrit en base AVANT de démarrer quoi que ce soit — sans lui,
@@ -159,6 +172,9 @@ if [[ -n "$EXEC_ID" ]]; then
     }
 
     valide_host "$HOST" || finir echec 2 "host refusé par le runner : $HOST"
+
+    deja_en_cours "$JPHASE" "$HOST" && finir annule 0 \
+        "un $JPHASE tourne déjà sur $HOST (lancé hors board) — non relancé"
 
     CMD=()
     case "$JPHASE" in
