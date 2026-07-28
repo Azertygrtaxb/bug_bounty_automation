@@ -76,8 +76,18 @@ def _is_core(host):
 # leads filtre dessus. Flag pour tout garder si besoin.
 INCLURE_HORS_SCOPE = os.environ.get("INCLURE_HORS_SCOPE", "0").lower() in ("1", "true", "yes", "on")
 
-# --- 1c : collapse des frères à préfixe commun (segment final NON-id qui varie) ---
+# --- 1c : collapse généralisé — >= N frères qui ne varient QUE sur UN segment (n'importe
+# quelle position) OU QUE sur les valeurs de query -> ce slot replié en {*}. ---
 COLLAPSE_PREFIXE_MIN = int(os.environ.get("COLLAPSE_PREFIXE_MIN", "4"))
+
+# --- Statut de triage HUMAIN d'un lead (table leads_statut, jamais truncatée) -----
+STATUTS_LEAD = ["a_voir", "en_cours", "tue", "rapporte"]
+STATUT_DEFAUT = "a_voir"
+
+# --- Quota de diversité par host DANS LA VUE (0 = illimité). Au-delà, les leads en
+# trop sont repliés en UNE ligne « +N autres » : on déprioritise l'affichage, on ne
+# supprime jamais (§0.4). Le quota s'applique à la LECTURE ; la table `leads` garde tout.
+MAX_LEADS_PAR_HOST = int(os.environ.get("MAX_LEADS_PAR_HOST", "5"))
 
 
 def deep_rank(score_shallow, tech, host, paths):
