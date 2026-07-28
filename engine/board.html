@@ -227,6 +227,16 @@ async function chargerGroupe(){
 // pas le fait d'avoir cliqué.
 async function chargerOps(hosts){
   if(!hosts.length) return;
+  // La vue groupée peut afficher plusieurs centaines de hosts ; l'API en accepte 300
+  // par appel. On découpe plutôt que de tronquer : une cellule laissée à « … » pour
+  // toujours ressemble à un bug, pas à une limite.
+  if(hosts.length>200){
+    for(let i=0;i<hosts.length;i+=200) await chargerOpsLot(hosts.slice(i,i+200));
+    return;
+  }
+  return chargerOpsLot(hosts);
+}
+async function chargerOpsLot(hosts){
   // On ne redessine QUE les cellules demandées : un rafraîchissement ciblé après un
   // clic ne doit pas effacer l'état des autres lignes avec un jeu de données partiel.
   const vises=new Set(hosts);
