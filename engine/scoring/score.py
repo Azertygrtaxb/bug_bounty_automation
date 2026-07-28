@@ -18,17 +18,19 @@ from knowledge import signaux, substance
 DATABASE_URL = os.environ["DATABASE_URL"]
 
 _COLS = ("id, url, host, http_status, tech, tags, body_hash, body_len, "
-         "first_hop_status, first_hop_location")
+         "first_hop_status, first_hop_location, body_text, response_headers")
 
 
 def _target_dict(url, host, http_status, tech, tags, body_hash, body_len,
-                 first_hop_status, first_hop_location, is_catchall, catchall_n):
+                 first_hop_status, first_hop_location, is_catchall, catchall_n,
+                 body_text, response_headers):
     return {
         "url": url, "host": host, "http_status": http_status,
         "tech": tech or [], "tags": tags or {},
         "body_hash": body_hash, "body_len": body_len,
         "first_hop_status": first_hop_status, "first_hop_location": first_hop_location,
         "is_catchall": is_catchall, "catchall_n": catchall_n,
+        "body_text": body_text, "response_headers": response_headers or {},
     }
 
 
@@ -68,13 +70,13 @@ def score_targets():
             catchall = _catchall_par_host(rows)  # {host: {hash: nb}}
 
             for (tid, url, host, http_status, tech, tags, body_hash, body_len,
-                 fh_status, fh_location) in rows:
+                 fh_status, fh_location, body_text, response_headers) in rows:
                 host_ca = catchall.get(host, {})
                 is_ca = (body_hash in host_ca if body_hash
                          and not _est_redirection(fh_status) else False)
                 target = _target_dict(url, host, http_status, tech, tags, body_hash,
                                       body_len, fh_status, fh_location, is_ca,
-                                      host_ca.get(body_hash))
+                                      host_ca.get(body_hash), body_text, response_headers)
                 score, raisons = signaux.evaluer(target)
                 new_tags = {**(tags or {}),
                             "methode": "GET",

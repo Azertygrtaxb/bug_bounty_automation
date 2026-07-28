@@ -22,6 +22,8 @@ Purement déterministe (même target -> même sortie). Aucune IA, aucun réseau.
 >>> Édite librement les POIDS (dans la liste SIGNAUX pour les booléens, dans les
     fonctions graduées pour les autres) : c'est fait pour ça.
 """
+import datetime
+import os
 import re
 from urllib.parse import parse_qsl, urlencode, urlsplit
 
@@ -420,6 +422,242 @@ def verbe_state_changing_en_GET(t):
     return t.get("http_status") is not None and bool(_VERB_STATE.search(_signal_haystack(t)))
 
 
+# ==============================================================================
+# TIER 2 — FAMILLE A : HOST-VIEUX (vieux = CVE probable)
+# ------------------------------------------------------------------------------
+# Bonus de PRIORITÉ gradué, JAMAIS un verdict : un host peu maintenu est une cible
+# à creuser (nuclei ciblé sur ses CVE), pas une vuln en soi. Trois sous-signaux
+# (copyright périmé, techno sous version plancher, techno END-OF-LIFE) + un TLS
+# faible optionnel. Tous les seuils/poids/listes sont éditables (§14).
+# ==============================================================================
+
+# Année de référence : override possible pour un re-score déterministe/testable.
+ANNEE_COURANTE = int(os.environ.get("ANNEE_COURANTE", datetime.date.today().year))
+SEUIL_VIEUX = int(os.environ.get("SEUIL_VIEUX", "3"))  # copyright < courante-SEUIL => vieux
+POIDS_VIEUX_PAR_AN = 1                                  # gradation : +1 par an au-delà du seuil
+POIDS_VIEUX_MAX = 5                                     # plafond du bonus copyright
+
+_COPY_TOKEN = re.compile(r"(?:©|&copy;|copyright|\(c\))", re.IGNORECASE)
+_ANNEE4 = re.compile(r"(?:19|20)\d{2}")
+
+
+def _annee_copyright_max(body_text):
+    """Année MAX trouvée dans une fenêtre après un token de copyright (© / Copyright /
+    &copy; / (c)). Gère les plages « © 2015-2019 » -> 2019. None si aucune."""
+    if not body_text:
+        return None
+    best = None
+    for m in _COPY_TOKEN.finditer(body_text):
+        for a in _ANNEE4.findall(body_text[m.end(): m.end() + 20]):
+            y = int(a)
+            if 1990 <= y <= ANNEE_COURANTE and (best is None or y > best):
+                best = y
+    return best
+
+
+def host_vieux_copyright(t):
+    """GRADUÉ. Copyright périmé dans le corps -> host peu maintenu. Prend l'année MAX ;
+    si < ANNEE_COURANTE - SEUIL_VIEUX, +POIDS gradué par l'ancienneté (plafonné)."""
+    annee = _annee_copyright_max(t.get("body_text"))
+    if annee is None:
+        return 0
+    seuil_annee = ANNEE_COURANTE - SEUIL_VIEUX
+    if annee >= seuil_annee:
+        return 0
+    return min(POIDS_VIEUX_MAX, POIDS_VIEUX_PAR_AN * (seuil_annee - annee))
+
+
+# Produit -> version plancher SÛRE (éditable). En dessous = surface de CVE connues.
+# CURE : SERVEUR-SIDE / classe-RCE UNIQUEMENT. Une lib CLIENT-SIDE périmée
+# (Bootstrap/jQuery/Moment/Slick…) n'est PAS une vuln serveur -> retirée : old ≠
+# vulnérable côté serveur. IIS / Microsoft ASP.NET aussi retirés : la "version"
+# exposée est le CLR/framework, pas le niveau de patch (indicateur faux). Ne PAS
+# rajouter de plancher « microsoft asp.net » : le trou est volontaire.
+VERSION_PLANCHER = {
+    "wordpress": "6.0", "drupal": "9", "joomla": "4",
+    "php": "7.4", "apache": "2.4", "apache http server": "2.4", "nginx": "1.20",
+    "openssl": "3.0", "openssh": "8.0",
+    "tomcat": "9", "jboss": "7", "weblogic": "14",
+}
+POIDS_OBSOLETE_PAR_MAJEUR = 2  # gradation par écart de version MAJEURE
+POIDS_OBSOLETE_MAX = 6
+
+# Technos END-OF-LIFE (aucun patch de sécu possible) : présence = bonus fixe. Éditable.
+TECH_EOL = {
+    "angularjs", "angular.js", "plone", "flash", "adobe flash", "shockwave flash",
+    "yii1", "coldfusion", "silverlight", "vbscript", "mootools", "prototype",
+}
+POIDS_EOL = 4
+
+# Header Server bavard : 'Apache/2.2.14 (Unix)' -> ('apache','2.2.14'). Nourrit
+# tech_obsolete/tech_eol (produit:version extrait des en-têtes, pas que de tech[]).
+_SERVER_VER = re.compile(r"([A-Za-z][A-Za-z0-9 .+_-]*?)/(\d[\w.]*)")
+
+
+def _split_tech(item):
+    """'WordPress:6.1.1' -> ('wordpress','6.1.1') ; 'Apache' -> ('apache', None)."""
+    if not isinstance(item, str):
+        return None, None
+    if ":" in item:
+        nom, ver = item.split(":", 1)
+        return nom.strip().lower(), ver.strip()
+    return item.strip().lower(), None
+
+
+def _version_tuple(v):
+    nums = re.findall(r"\d+", v or "")
+    return tuple(int(n) for n in nums[:4]) or (0,)
+
+
+def _serveur_tech(headers):
+    """Header Server -> 'nom:version' minuscule (ou None si pas de version précise)."""
+    srv = _header(headers, "server")
+    if not srv:
+        return None
+    m = _SERVER_VER.search(str(srv))
+    if not m:
+        return None
+    return "%s:%s" % (m.group(1).strip().lower(), m.group(2))
+
+
+def _techs_effectives(t):
+    """tech[] + le produit:version extrait du header Server (server_bavard nourrit
+    host_vieux)."""
+    techs = list(t.get("tech") or [])
+    st = _serveur_tech(t.get("response_headers"))
+    if st:
+        techs.append(st)
+    return techs
+
+
+def tech_obsolete(t):
+    """GRADUÉ. Techno détectée SOUS sa version plancher sûre -> surface de CVE.
+    +POIDS gradué par l'écart de version MAJEURE (plafonné). Écart MAX pris."""
+    best = 0
+    for item in _techs_effectives(t):
+        nom, ver = _split_tech(item)
+        if not ver or nom not in VERSION_PLANCHER:
+            continue
+        v = _version_tuple(ver)
+        plancher = _version_tuple(VERSION_PLANCHER[nom])
+        if v >= plancher:
+            continue
+        ecart_majeur = max(1, plancher[0] - v[0])
+        best = max(best, min(POIDS_OBSOLETE_MAX, POIDS_OBSOLETE_PAR_MAJEUR * ecart_majeur))
+    return best
+
+
+def tech_eol(t):
+    """BOOLÉEN. Techno END-OF-LIFE (AngularJS/Plone/Flash/ColdFusion...) présente
+    dans tech[] ou le header Server -> surface de CVE non corrigeable."""
+    for item in _techs_effectives(t):
+        nom, _ = _split_tech(item)
+        if nom in TECH_EOL:
+            return True
+    return False
+
+
+# TLS faible (optionnel) : httpx rend tls_version type 'tls10'/'tls11'/'tls12'.
+POIDS_TLS_FAIBLE = 1
+_TLS_FAIBLES = {"tls10", "tls11", "ssl30", "ssl20", "sslv3", "sslv2"}
+
+
+def tls_faible(t):
+    """BOOLÉEN (faible). TLS 1.0/1.1 (ou SSLv2/3) négocié -> configuration datée."""
+    tls = (t.get("tags") or {}).get("tls") or {}
+    ver = re.sub(r"[^a-z0-9]", "", str(tls.get("tls_version") or "").lower())
+    return ver in _TLS_FAIBLES
+
+
+# ==============================================================================
+# TIER 2 — FAMILLE B : SIGNAUX D'EN-TÊTES (on capture response_headers, on l'exploite)
+# ------------------------------------------------------------------------------
+# httpx normalise les clés d'en-tête (minuscule + '_'). _header() est tolérant à la
+# casse et au séparateur (-/_) pour rester robuste quelle que soit la source.
+# ==============================================================================
+
+
+def _header(headers, name):
+    """Valeur d'un en-tête, clé insensible à la casse et au séparateur (-/_)."""
+    if not isinstance(headers, dict):
+        return None
+    cible = name.lower().replace("-", "_")
+    for k, v in headers.items():
+        if isinstance(k, str) and k.lower().replace("-", "_") == cible:
+            return v
+    return None
+
+
+POIDS_CORS = 3
+POIDS_CORS_CREDS = 5  # ACAO permissif + Allow-Credentials:true = vol de données auth
+
+
+def cors_permissif(t):
+    """GRADUÉ. Access-Control-Allow-Origin='*' -> CORS ouvert (+POIDS_CORS) ; combiné
+    à Allow-Credentials:true -> vol de données authentifiées (+POIDS_CORS_CREDS). Une
+    ORIGINE PRÉCISE renvoyée n'est signalée QUE si credentials:true (sinon = allowlist
+    normale, non observable comme réfléchie en recon passif)."""
+    h = t.get("response_headers")
+    acao = _header(h, "access-control-allow-origin")
+    if not acao:
+        return 0
+    acao = str(acao).strip()
+    creds = str(_header(h, "access-control-allow-credentials") or "").strip().lower() == "true"
+    if acao == "*":
+        return POIDS_CORS_CREDS if creds else POIDS_CORS
+    if acao.lower() != "null":
+        return POIDS_CORS_CREDS if creds else 0
+    return 0
+
+
+POIDS_COOKIE = 2
+_SESSION_COOKIE = re.compile(
+    r"(sess|sid|auth|token|jwt|jsession|phpsessid|asp\.net_sessionid|csrf)", re.IGNORECASE)
+
+
+def cookie_faible(t):
+    """BOOLÉEN (faible). Cookie de SESSION (nom évocateur) posé sans Secure / HttpOnly
+    / SameSite -> vol/fixation de session."""
+    sc = _header(t.get("response_headers"), "set-cookie")
+    if not sc:
+        return False
+    sc_str = " ".join(sc) if isinstance(sc, (list, tuple)) else str(sc)
+    if not _SESSION_COOKIE.search(sc_str):
+        return False
+    low = sc_str.lower()
+    return "httponly" not in low or "secure" not in low or "samesite" not in low
+
+
+def server_bavard(t):
+    """BOOLÉEN (faible). Header Server expose une version précise (Apache/2.2.14,
+    nginx/1.4, IIS/7) -> info disclosure ; alimente aussi tech_obsolete/tech_eol."""
+    return _serveur_tech(t.get("response_headers")) is not None
+
+
+POIDS_AUTH_BASIC = 3
+
+
+def auth_basic_exposee(t):
+    """BOOLÉEN. WWW-Authenticate: Basic sur un endpoint applicatif -> creds en clair,
+    panneau interne exposé. Assets/pages statiques exclus."""
+    wa = _header(t.get("response_headers"), "www-authenticate")
+    if not wa or "basic" not in str(wa).lower():
+        return False
+    return not _hors_surface(t)
+
+
+POIDS_SECU_ABSENTE = 1
+
+
+def secu_absente(t):
+    """BOOLÉEN (faible). Page de FLUX D'AUTH sans CSP ni X-Frame-Options
+    -> clickjacking / injection. Restreint aux pages sensibles pour éviter le bruit."""
+    if not flux_auth(t):
+        return False
+    h = t.get("response_headers")
+    return not _header(h, "content-security-policy") and not _header(h, "x-frame-options")
+
+
 # --- La liste éditable : (nom, test, poids) -----------------------------------
 # poids = int pour un signal BOOLÉEN ; None pour un signal GRADUÉ (poids interne).
 SIGNAUX = [
@@ -430,7 +668,26 @@ SIGNAUX = [
     ("mouvement_argent",            mouvement_argent,            5),
     ("surface_exposee",             surface_exposee,             None),
     ("verbe_state_changing_en_GET", verbe_state_changing_en_GET, 2),
+    # --- Tier 2A : host-vieux (CVE probable) ---
+    ("host_vieux_copyright",        host_vieux_copyright,        None),
+    ("tech_obsolete",               tech_obsolete,               None),
+    ("tech_eol",                    tech_eol,                    POIDS_EOL),
+    ("tls_faible",                  tls_faible,                  POIDS_TLS_FAIBLE),
+    # --- Tier 2B : signaux d'en-têtes ---
+    ("cors_permissif",              cors_permissif,              None),
+    ("cookie_faible",               cookie_faible,               POIDS_COOKIE),
+    ("server_bavard",               server_bavard,               1),
+    ("auth_basic_exposee",          auth_basic_exposee,          POIDS_AUTH_BASIC),
+    ("secu_absente",                secu_absente,                POIDS_SECU_ABSENTE),
 ]
+
+# --- Plafond HOST-VIEUX : signal de PRIORITÉ, pas un écraseur -------------------
+# La SOMME des bonus host-vieux d'une ligne (obsolescence + copyright + EOL cumulés)
+# est plafonnée à CAP_HOST_VIEUX. Un vrai BOLA id (+6) doit rester AU-DESSUS d'un
+# host « vieux ». Le host-vieux départage en appoint ; son vrai payoff est le pont
+# nuclei en Tier 3 (flag vieux -> scanner ses CVE), pas réordonner le board. Éditable.
+CAP_HOST_VIEUX = int(os.environ.get("CAP_HOST_VIEUX", "3"))
+HOST_VIEUX_SIGNAUX = {"host_vieux_copyright", "tech_obsolete", "tech_eol"}
 
 
 def evaluer(target):
@@ -446,16 +703,29 @@ def evaluer(target):
     pénalité laisse une raison visible (« statut_404(x0.0) »)."""
     score = 0
     raisons = []
+    hv_sum = 0                       # sous-total des bonus host-vieux (à plafonner)
     for nom, test, poids in SIGNAUX:
         res = test(target)
         if res is True:              # booléen déclenché -> poids fixe
-            score += poids
+            contrib = poids
             raisons.append(nom)
         elif isinstance(res, bool):  # booléen False -> rien
             continue
         elif isinstance(res, int) and res > 0:  # gradué -> poids renvoyé
-            score += res
+            contrib = res
             raisons.append(f"{nom}(+{res})")
+        else:
+            continue
+        score += contrib
+        if nom in HOST_VIEUX_SIGNAUX:
+            hv_sum += contrib
+
+    # Plafond host-vieux : la somme (obsolescence + copyright + EOL) ne peut pas
+    # écraser les signaux endpoint. L'excédent est retiré, raison tracée.
+    if hv_sum > CAP_HOST_VIEUX:
+        exces = hv_sum - CAP_HOST_VIEUX
+        score -= exces
+        raisons.append(f"host_vieux_cap(-{exces})")
 
     # Modulation par le statut HTTP (un id mort n'est pas une cible).
     status = target.get("http_status")
