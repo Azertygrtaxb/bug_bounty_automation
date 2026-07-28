@@ -121,6 +121,13 @@ EXTRAIT_CORPS_MAX = int(os.environ.get("EXTRAIT_CORPS_MAX", "2000"))
 BOARD_MAX_ECHECS = int(os.environ.get("BOARD_MAX_ECHECS", "5"))
 BOARD_FENETRE_ECHECS = int(os.environ.get("BOARD_FENETRE_ECHECS", "300"))
 
+# --- Proxies de confiance (E3) : seules ces IP/CIDR peuvent fixer X-Forwarded-For. Défaut
+# = réseaux privés (le board est joint par Caddy sur le réseau Docker interne). Un client
+# DIRECT hors de ces plages voit son XFF IGNORÉ (l'en-tête est trivialement falsifiable).
+PROXIES_DE_CONFIANCE = [c.strip() for c in os.environ.get(
+    "PROXIES_DE_CONFIANCE",
+    "127.0.0.0/8,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16").split(",") if c.strip()]
+
 
 def deep_rank(score_shallow, tech, host, paths):
     """Renvoie (deep_rank:int, detail:dict). detail expose chaque composante pour

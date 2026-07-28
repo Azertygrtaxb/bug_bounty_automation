@@ -46,13 +46,12 @@ recon, ne touche jamais `targets` (sauf lecture). Serveur stdlib (`engine/board.
 une page (`engine/board.html`), zéro build front.
 
 ```bash
-# migrations à jour (006→011) + BOARD_ACCOUNTS renseigné dans .env, puis :
-docker compose up -d board
-# board publié sur 127.0.0.1:8080 UNIQUEMENT. Depuis ta machine :
-ssh -L 8080:localhost:8080 root@<vps>   # puis http://localhost:8080 (login demandé)
+# migrations à jour (006→011) + BOARD_ACCOUNTS + BOARD_DOMAINE dans .env, puis :
+docker compose up -d          # postgres, redis, worker, board, caddy
+# -> https://<BOARD_DOMAINE> (Caddy, cert auto, login demandé). Voir « Mise en ligne » plus bas.
 ```
 
-Accès machine (le collègue) : `GET /api/leads?min_score=6&quota=0` (avec auth) renvoie du JSON pur.
+Accès machine (le collègue) : `GET /api/leads?min_score=6&quota=0` (avec auth, en HTTPS) renvoie du JSON pur.
 
 ### Login (obligatoire, board partagé à deux)
 Le board porte la carte d'attaque d'un périmètre bancaire : **login obligatoire partout**,
@@ -77,9 +76,11 @@ tout) mais contre la **réutilisation** du mot de passe ailleurs.
   passe ni le corps. Chaque statut trace **qui** (`par_qui`, UI + API).
 - **En-têtes** sur la page : `Content-Security-Policy` (aucune connexion/image sortante) +
   `X-Frame-Options: DENY`.
-- `BOARD_EXPOSE=0` (défaut) : bind publié sur 127.0.0.1 (tunnel SSH). `BOARD_EXPOSE=1` +
-  `BOARD_BIND_HOST=0.0.0.0` pour exposer — préfère le tunnel (HTTP clair = identifiants ET
-  cibles à nu). Le login reste obligatoire dans les deux cas.
+- **X-Forwarded-For** n'est cru que si la connexion vient d'un `PROXIES_DE_CONFIANCE` (§14,
+  défaut = réseau Docker) ; sinon l'en-tête est ignoré (sinon un client direct ferait tomber
+  le blocage anti-bruteforce sur un compte innocent). L'IP retenue est journalisée.
+- Exposition : voir **Mise en ligne** (Caddy HTTPS, défaut) ou le mode tunnel de secours.
+  Le login reste obligatoire dans tous les cas.
 
 ### Rôle postgres SELECT-only du board (recommandé)
 Le process board n'a besoin que de lire `targets`/`leads` et d'écrire `leads_statut`
@@ -93,3 +94,29 @@ GRANT SELECT, INSERT, UPDATE ON leads_statut TO board_ro;  -- statut de triage h
 -- (pas de CREATE : le board ne fait aucun DDL ; les migrations tournent avec le compte applicatif)
 ```
 Puis `BOARD_DB_USER=board_ro` + `BOARD_DB_PASS=...` dans `.env`.
+
+### Mise en ligne (HTTPS via Caddy)
+Caddy est la **seule** porte d'entrée publique (ports 80 et 443). Le board n'est PAS publié
+sur l'hôte : Caddy le joint par le réseau Docker interne (`board:8080`).
+
+1. **DNS** : crée un enregistrement A `board.exemple.com` → IP du VPS. (Dépannage sans DNS :
+   `BOARD_DOMAINE=<ip-avec-tirets>.nip.io`, ex. `203-0-113-7.nip.io`.)
+2. **.env** : `BOARD_DOMAINE=board.exemple.com`, `BOARD_EXPOSE=1`, `BOARD_ACCOUNTS='…'` hachés.
+3. **Pare-feu** : ouvre **80 et 443 UNIQUEMENT** (80 sert le challenge ACME + la redirection).
+   22 (SSH) reste pour l'admin. Rien d'autre.
+4. `docker compose up -d` → Caddy obtient le certificat, sert `https://board.exemple.com`,
+   redirige HTTP→HTTPS et ajoute `Strict-Transport-Security`.
+
+**Couple contre-intuitif** : il faut `BOARD_EXPOSE=1` (l'app écoute sur `0.0.0.0` DANS le
+conteneur, sinon Caddy ne l'atteint pas) **ET pourtant aucun port board n'est publié** sur
+l'hôte — l'écoute 0.0.0.0 est interne au réseau Docker, l'unique exposition reste Caddy.
+`ss -ltnp` sur le VPS ne doit montrer que 80, 443 (et 22).
+
+**Retour au mode tunnel** (sans Caddy, ex. debug) : garde `BOARD_EXPOSE=1` (l'app doit écouter
+sur `0.0.0.0` dans le conteneur pour qu'un port publié l'atteigne), décommente la section
+`ports:` du service `board` (`127.0.0.1:8080:8080` — publié seulement sur la loopback de
+l'hôte), arrête Caddy, puis `ssh -L 8080:localhost:8080 root@<vps>` → http://localhost:8080.
+(`BOARD_EXPOSE=0` ne sert qu'au dev local HORS docker : l'app écoute alors 127.0.0.1.)
+
+postgres et redis n'ont **aucun** port publié (réseau Docker interne). Accès DB depuis
+l'hôte : `docker compose exec postgres psql -U <user> -d <db>`.

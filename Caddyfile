@@ -1,0 +1,7 @@
+# Reverse-proxy TLS du board. Caddy obtient et renouvelle le certificat tout seul
+# (Let's Encrypt) pour {$BOARD_DOMAINE}, redirige HTTP->HTTPS, et ajoute HSTS.
+# BOARD_DOMAINE = nom DNS pointant sur ce VPS (à défaut <ip-avec-tirets>.nip.io).
+{$BOARD_DOMAINE} {
+	reverse_proxy board:8080
+	header Strict-Transport-Security "max-age=31536000; includeSubDomains"
+}

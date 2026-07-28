@@ -2,8 +2,8 @@ services:
   postgres:
     image: postgres:16
     env_file: .env
-    ports:
-      - "5432:5432"
+    # PAS de ports publiés : joignable uniquement sur le réseau Docker interne (worker/board
+    # via `postgres:5432`). Accès depuis l'hôte : `docker compose exec postgres psql …`.
     volumes:
       - pgdata:/var/lib/postgresql/data
       # Les .sql de ce dossier sont joués une seule fois, à la création du volume.
@@ -16,8 +16,7 @@ services:
 
   redis:
     image: redis:7
-    ports:
-      - "6379:6379"
+    # PAS de ports publiés : broker interne au réseau Docker (`redis:6379`).
 
   worker:
     build:
@@ -48,9 +47,9 @@ services:
         condition: service_started
 
   # --- Dashboard de chasse (Tier 4) : LIT leads, ÉCRIT leads_statut. Réutilise l'image
-  # worker (mêmes deps, aucun build front). Publié sur 127.0.0.1 UNIQUEMENT par défaut :
-  # accès via tunnel SSH (ssh -L 8080:localhost:8080 root@<vps>). Le board porte la carte
-  # d'attaque d'un périmètre bancaire -> pas d'IP publique en clair sans raison.
+  # worker (mêmes deps, aucun build front). AUCUN port publié : la seule porte d'entrée est
+  # Caddy en HTTPS (board:8080 sur le réseau Docker interne). Exige BOARD_EXPOSE=1 pour que
+  # l'app écoute sur 0.0.0.0 DANS le conteneur (sinon Caddy ne l'atteint pas).
   board:
     build:
       context: .
@@ -61,19 +60,39 @@ services:
       # À défaut de rôle dédié, retombe sur le compte applicatif.
       DATABASE_URL: postgresql://${BOARD_DB_USER:-${POSTGRES_USER}}:${BOARD_DB_PASS:-${POSTGRES_PASSWORD}}@postgres:5432/${POSTGRES_DB}
       BOARD_PORT: "8080"
-      BOARD_EXPOSE: "${BOARD_EXPOSE:-0}"     # 0=localhost/tunnel ; 1=0.0.0.0 (login déjà obligatoire)
+      BOARD_EXPOSE: "${BOARD_EXPOSE:-1}"     # 1 = écoute 0.0.0.0 dans le conteneur (Caddy y accède)
       # Login OBLIGATOIRE (board partagé, ≥2 comptes). Vide -> le board refuse de démarrer.
       BOARD_ACCOUNTS: "${BOARD_ACCOUNTS:-}"  # 'alice:pbkdf2$...,bob:pbkdf2$...' (hash via --hash-pass)
       BOARD_USER: "${BOARD_USER:-}"          # (legacy, compte unique optionnel)
       BOARD_PASS: "${BOARD_PASS:-}"
       BOARD_MAX_ECHECS: "${BOARD_MAX_ECHECS:-5}"        # anti-bruteforce : échecs tolérés / (user,IP)
       BOARD_FENETRE_ECHECS: "${BOARD_FENETRE_ECHECS:-300}"  # fenêtre (s) du compteur d'échecs
-    ports:
-      # 127.0.0.1 par défaut. Pour exposer : BOARD_BIND_HOST=0.0.0.0 + BOARD_EXPOSE=1 + creds.
-      - "${BOARD_BIND_HOST:-127.0.0.1}:8080:8080"
+      PROXIES_DE_CONFIANCE: "${PROXIES_DE_CONFIANCE:-127.0.0.0/8,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16}"
+    # Mode TUNNEL de secours (sans Caddy) : décommente et mets BOARD_BIND_HOST=127.0.0.1.
+    # ports:
+    #   - "${BOARD_BIND_HOST:-127.0.0.1}:8080:8080"
     depends_on:
       postgres:
         condition: service_healthy
 
+  # --- Reverse-proxy TLS (E1) : SEULE porte d'entrée publique (80/443). Certificat
+  # automatique pour BOARD_DOMAINE, redirection HTTP->HTTPS, HSTS. Persiste les certs.
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    environment:
+      BOARD_DOMAINE: "${BOARD_DOMAINE:-}"   # nom DNS -> ce VPS (Caddy refuse de servir si vide)
+    depends_on:
+      - board
+
 volumes:
   pgdata:
+  caddy_data:
+  caddy_config:

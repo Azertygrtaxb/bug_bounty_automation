@@ -25,6 +25,7 @@ import base64
 import getpass
 import hashlib
 import hmac
+import ipaddress
 import json
 import os
 import sys
@@ -41,9 +42,27 @@ from knowledge import config      # noqa: E402
 
 HTML = Path(__file__).resolve().parent / "board.html"
 PORT = int(os.environ.get("BOARD_PORT", "8080"))
-BIND = os.environ.get("BOARD_BIND", "0.0.0.0")  # publish côté host contrôle l'exposition réelle
 EXPOSE = os.environ.get("BOARD_EXPOSE", "0").lower() in ("1", "true", "yes", "on")
+# EXPOSE=1 -> écoute 0.0.0.0 DANS le conteneur (joignable par Caddy sur le réseau Docker,
+# OU par un port publié). EXPOSE=0 -> 127.0.0.1 (dev local hors docker). BOARD_BIND force.
+BIND = os.environ.get("BOARD_BIND") or ("0.0.0.0" if EXPOSE else "127.0.0.1")
 PBKDF2_ITERS = int(os.environ.get("BOARD_PBKDF2_ITERS", "600000"))
+
+# Réseaux de confiance pour X-Forwarded-For (E3), pré-compilés une fois.
+_RESEAUX_CONFIANCE = []
+for _c in config.PROXIES_DE_CONFIANCE:
+    try:
+        _RESEAUX_CONFIANCE.append(ipaddress.ip_network(_c, strict=False))
+    except ValueError:
+        pass
+
+
+def _est_proxy_confiance(ip):
+    try:
+        a = ipaddress.ip_address(ip)
+    except ValueError:
+        return False
+    return any(a in n for n in _RESEAUX_CONFIANCE)
 
 
 def _parse_comptes(raw, legacy_user, legacy_pass):
@@ -225,10 +244,23 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("WWW-Authenticate", 'Basic realm="Lead Board"')
         self.end_headers()
 
+    def _ip_client(self):
+        """IP RÉELLE du client (sert au comptage anti-bruteforce). Ne fait confiance à
+        X-Forwarded-For que si la connexion vient d'un proxy de confiance (§14) ; sinon
+        l'en-tête est ignoré (falsifiable par un client direct). Prend la DERNIÈRE valeur
+        du XFF = celle ajoutée par le proxy de confiance (le vrai client), pas une valeur
+        que le client aurait pré-insérée à gauche."""
+        peer = self.client_address[0]
+        if _est_proxy_confiance(peer):
+            xff = self.headers.get("X-Forwarded-For", "")
+            if xff.strip():
+                return xff.split(",")[-1].strip()
+        return peer
+
     def _garde(self):
         """Login OBLIGATOIRE partout. Anti-bruteforce (429 avant toute comparaison) +
         journal des échecs/blocages. Renvoie le compte, ou None après avoir répondu."""
-        ip = self.client_address[0]
+        ip = self._ip_client()
         user, pwd = _decode_basic(self.headers.get("Authorization", ""))
         if user is None:
             self._exiger_auth()
@@ -366,7 +398,7 @@ class Handler(BaseHTTPRequestHandler):
         except ValueError as e:
             return self._envoyer(400, {"erreur": str(e)})
         _journal("STATUT par=%s ip=%s host=%s pattern=%s statut=%s"
-                 % (user, self.client_address[0], host, pattern, statut))
+                 % (user, self._ip_client(), host, pattern, statut))
         return self._envoyer(200, {"ok": True, "host": host, "pattern": pattern,
                                    "statut": statut, "par": user})
 
