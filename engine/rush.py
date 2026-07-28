@@ -22,6 +22,7 @@ sys.path.insert(0, str(ROOT))
 load_dotenv(ROOT / ".env")
 
 import psycopg  # noqa: E402
+from engine import scope  # noqa: E402
 from engine.celery_app import app  # noqa: E402
 from engine.recon.discover import MAX_DEEP_HOSTS  # noqa: E402
 from knowledge import config  # noqa: E402
@@ -77,8 +78,12 @@ def main(argv):
     if not hosts:
         print("usage: python engine/rush.py host1 host2 ... | --file hosts.txt")
         return 1
-    print("=== RUSH tiéré sur %d hosts | promotion par DEEP_RANK (>0) | MAX_DEEP_HOSTS=%d ==="
-          % (len(hosts), MAX_DEEP_HOSTS))
+    # SCOPE dérivé de la liste lancée (registered-domains) -> persisté ; la vue leads
+    # filtre dessus. Aucune allowlist à la main.
+    roots = scope.deriver_roots(hosts)
+    scope.enregistrer_roots(roots)
+    print("=== RUSH tiéré sur %d hosts | SCOPE_ROOTS=%d (%s) | DEEP_RANK(>0) | MAX_DEEP_HOSTS=%d ==="
+          % (len(hosts), len(roots), ",".join(roots[:6]) + ("…" if len(roots) > 6 else ""), MAX_DEEP_HOSTS))
 
     # --- TIER 1 : SHALLOW sur TOUS ---
     sh = [app.send_task("discover_shallow", args=[h]) for h in hosts]

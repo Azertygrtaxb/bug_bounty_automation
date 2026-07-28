@@ -251,6 +251,38 @@ def _hors_surface(t):
     return _is_asset(t) or _is_static_info(t)
 
 
+# --- Année ≠ id : un segment de chemin de 4 chiffres dans une plage-année plausible
+# est une ANNÉE (/insurance-products/2019, /partage/2018/...), pas un id court.
+# Éditable §0.4. Un 4-chiffres HORS plage (ex. 4217) reste un id plein.
+ANNEE_MIN, ANNEE_MAX = 1990, 2035
+ANNEE_POIDS = 0
+
+# --- Timestamp / cache-buster ≠ id : un segment numérique nu trop grand pour un id
+# plausible (>= TIMESTAMP_MIN_DIGITS chiffres OU valeur > MAX_ID_PLAUSIBLE) est un
+# timestamp Unix / cache-buster (Moodle /lib/requirejs.php/1772700809/...), pas un id.
+# Un id numérique réaliste (< seuil) reste un id plein. Éditable §0.4.
+TIMESTAMP_MIN_DIGITS = 10
+MAX_ID_PLAUSIBLE = 1_000_000_000
+TIMESTAMP_POIDS = 0
+
+
+def _est_annee_chemin(seg):
+    return len(seg) == 4 and seg.isdigit() and ANNEE_MIN <= int(seg) <= ANNEE_MAX
+
+
+def _est_timestamp(seg):
+    return seg.isdigit() and (len(seg) >= TIMESTAMP_MIN_DIGITS or int(seg) > MAX_ID_PLAUSIBLE)
+
+
+def _poids_num_chemin(seg):
+    """Poids d'un segment de chemin numérique : année/timestamp neutralisés, sinon id."""
+    if _est_annee_chemin(seg):
+        return ANNEE_POIDS
+    if _est_timestamp(seg):
+        return TIMESTAMP_POIDS
+    return _num_weight(seg)
+
+
 # --- Tests des signaux --------------------------------------------------------
 def _num_weight(value):
     """id numérique court (devinable/séquentiel) plus grave que long."""
@@ -270,9 +302,10 @@ def id_non_derive_session(t):
     best = 0
 
     # Segments de chemin purement numériques : /account/42
+    # (ANNÉE nue et TIMESTAMP/cache-buster neutralisés ; un id réaliste reste un id)
     for seg in parts.path.split("/"):
         if seg.isdigit():
-            best = max(best, _num_weight(seg))
+            best = max(best, _poids_num_chemin(seg))
     # UUID n'importe où dans le chemin ou la requête
     if _UUID_ANY.search(parts.path) or _UUID_ANY.search(parts.query):
         best = max(best, 3)

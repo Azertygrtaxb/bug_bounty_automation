@@ -14,6 +14,7 @@ DEEP_RANK valorise ces hosts EN AMONT du deep-crawl :
 Générique : AUCUN host codé en dur. La liste des domaines cœur est de la config de
 scope (§14), légitime. Tous les poids et listes ci-dessous sont éditables.
 """
+import os
 import re
 
 from knowledge.signaux import PRODUITS
@@ -67,6 +68,16 @@ def _is_produit(tech_l):
 def _is_core(host):
     h = (host or "").lower().rstrip(".")
     return any(h == d or h.endswith("." + d) for d in DOMAINES_COEUR)
+
+
+# --- 1b : scope DÉRIVÉ de la liste lancée (voir engine/scope.py) ---------------
+# Plus d'allowlist curée à la main : SCOPE_ROOTS est dérivé des registered-domains de
+# la liste targets passée au rush et persisté en base (table scope_roots). La vue
+# leads filtre dessus. Flag pour tout garder si besoin.
+INCLURE_HORS_SCOPE = os.environ.get("INCLURE_HORS_SCOPE", "0").lower() in ("1", "true", "yes", "on")
+
+# --- 1c : collapse des frères à préfixe commun (segment final NON-id qui varie) ---
+COLLAPSE_PREFIXE_MIN = int(os.environ.get("COLLAPSE_PREFIXE_MIN", "4"))
 
 
 def deep_rank(score_shallow, tech, host, paths):
