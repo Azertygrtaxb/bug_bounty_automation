@@ -11,7 +11,13 @@ LECTURE :
 
 Le pattern normalisé est stocké (tags.lead_pattern) pour que le dashboard groupe pareil.
 
-Usage :  python engine/leads.py [seuil_score]   (défaut 1)  [--csv fichier]
+La vue est PERSISTÉE dans la table `leads` (source de vérité) : construire() calcule,
+persister() remplace tout, lire() relit sans recalcul. La tâche Celery rebuild_leads
+(engine/scoring/score.py) la régénère après chaque score_targets. targets reste le
+détail par endpoint ; leads = la vue curée.
+
+Usage :  python engine/leads.py [seuil] [--rebuild] [--csv fichier]
+    --rebuild : recalcule (1b+1c) et remplace la table leads (sinon lit la table).
 """
 import os
 import sys
@@ -82,12 +88,27 @@ def _collapse_freres(patterns_par_host):
     return remap
 
 
+def _assurer_table(cur):
+    """CREATE TABLE IF NOT EXISTS leads (idempotent, aligné sur db/006_leads.sql)."""
+    cur.execute(
+        "CREATE TABLE IF NOT EXISTS leads ("
+        " host TEXT NOT NULL, pattern TEXT NOT NULL, url_representative TEXT,"
+        " score INTEGER, raisons TEXT[], nb INTEGER, http_status INTEGER,"
+        " tech TEXT[], in_scope BOOLEAN, updated_at TIMESTAMPTZ DEFAULT now(),"
+        " PRIMARY KEY (host, pattern))")
+
+
 def construire(seuil=1):
-    """Renvoie (lignes_leads, stats). Applique 1b puis 1c. Écrit tags.lead_pattern."""
+    """Calcule les leads curés (1b scope + 1c collapse). Renvoie (lignes, stats).
+    Chaque ligne = {host, pattern, url_representative, score, raisons, nb, http_status,
+    tech, in_scope} (le représentant = le membre au score MAX du groupe). Écrit aussi
+    tags.lead_pattern sur targets (groupement dashboard). N'ÉCRIT PAS dans `leads` :
+    c'est persister() qui le fait (séparation calcul / écriture)."""
     with psycopg.connect(DATABASE_URL) as conn:
         with conn.cursor() as cur:
             cur.execute("SELECT id, host, url, score, COALESCE(score_raisons,'{}'), "
-                        "COALESCE(tags,'{}') FROM targets WHERE score >= %s", (seuil,))
+                        "http_status, COALESCE(tech,'{}'), COALESCE(tags,'{}') "
+                        "FROM targets WHERE score >= %s", (seuil,))
             rows = cur.fetchall()
 
             brut = len(rows)
@@ -95,59 +116,102 @@ def construire(seuil=1):
             # liste lancée (OU marque hors_cible si présente). Scope vide -> fail-open.
             roots = scope.charger_roots()
             gardes, exclus_hc = [], 0
-            for rid, host, url, score, raisons, tags in rows:
+            for rid, host, url, score, raisons, http_status, tech, tags in rows:
                 marque = "hors_cible_de_lancement" in ",".join(raisons)
-                if not config.INCLURE_HORS_SCOPE and (scope.hors_scope(host, roots) or marque):
+                dehors = scope.hors_scope(host, roots) or marque
+                if not config.INCLURE_HORS_SCOPE and dehors:
                     exclus_hc += 1
                     continue
-                gardes.append((rid, host, url, score, tags))
+                gardes.append({"id": rid, "host": host, "url": url, "score": score,
+                               "raisons": list(raisons or []), "http_status": http_status,
+                               "tech": list(tech or []), "tags": tags,
+                               "in_scope": not dehors})
             apres_1b = len(gardes)
 
             # 1c — patternize + stockage tags.lead_pattern
-            pat_of = {}
-            for rid, host, url, score, tags in gardes:
-                pat = patternize(url)
-                pat_of[rid] = (host, pat)
-                if (tags or {}).get("lead_pattern") != pat:
+            for g in gardes:
+                pat = patternize(g["url"])
+                g["pattern"] = pat
+                if (g["tags"] or {}).get("lead_pattern") != pat:
                     cur.execute("UPDATE targets SET tags = jsonb_set(COALESCE(tags,'{}'::jsonb), "
-                                "'{lead_pattern}', to_jsonb(%s::text)) WHERE id = %s", (pat, rid))
+                                "'{lead_pattern}', to_jsonb(%s::text)) WHERE id = %s", (pat, g["id"]))
             # collapse des frères à préfixe commun
-            remap = _collapse_freres(set(pat_of.values()))
-            groupes = {}  # (host, pattern_final) -> {nb, score_max, exemple}
-            for rid, host, url, score, tags in gardes:
-                host2, pat = pat_of[rid]
-                pat = remap.get((host, pat), pat)
-                key = (host, pat)
-                g = groupes.setdefault(key, {"nb": 0, "score": 0, "exemple": url})
-                g["nb"] += 1
-                if score > g["score"]:
-                    g["score"] = score; g["exemple"] = url
+            remap = _collapse_freres({(g["host"], g["pattern"]) for g in gardes})
+            groupes = {}  # (host, pattern_final) -> {nb, score_max, representant}
+            for g in gardes:
+                pat = remap.get((g["host"], g["pattern"]), g["pattern"])
+                key = (g["host"], pat)
+                grp = groupes.setdefault(key, {"nb": 0, "score": -1, "rep": None})
+                grp["nb"] += 1
+                if g["score"] > grp["score"]:
+                    grp["score"] = g["score"]; grp["rep"] = g
         conn.commit()
 
-    lignes = [{"host": h, "pattern": p, "nb": g["nb"], "score": g["score"], "exemple": g["exemple"]}
-              for (h, p), g in groupes.items()]
+    lignes = []
+    for (host, pat), grp in groupes.items():
+        rep = grp["rep"]
+        lignes.append({"host": host, "pattern": pat, "url_representative": rep["url"],
+                       "score": grp["score"], "raisons": rep["raisons"], "nb": grp["nb"],
+                       "http_status": rep["http_status"], "tech": rep["tech"],
+                       "in_scope": rep["in_scope"]})
     lignes.sort(key=lambda x: (x["score"], x["nb"]), reverse=True)
     return lignes, {"brut": brut, "apres_1b": apres_1b, "exclus_hors_cible": exclus_hc,
                     "apres_1c": len(lignes)}
 
 
+def persister(lignes):
+    """Remplace TOUT le contenu de `leads` par `lignes` (source de vérité régénérée à
+    chaque re-score : les patterns disparus d'un run précédent ne survivent pas)."""
+    with psycopg.connect(DATABASE_URL) as conn:
+        with conn.cursor() as cur:
+            _assurer_table(cur)
+            cur.execute("TRUNCATE leads")
+            cur.executemany(
+                "INSERT INTO leads (host, pattern, url_representative, score, raisons, "
+                "nb, http_status, tech, in_scope, updated_at) VALUES "
+                "(%(host)s, %(pattern)s, %(url_representative)s, %(score)s, %(raisons)s, "
+                "%(nb)s, %(http_status)s, %(tech)s, %(in_scope)s, now())", lignes)
+        conn.commit()
+    return len(lignes)
+
+
+def lire(seuil=1):
+    """Lit `leads` (la source de vérité) — AUCUN recalcul. Base de l'export/dashboard."""
+    with psycopg.connect(DATABASE_URL) as conn, conn.cursor() as cur:
+        _assurer_table(cur)
+        cur.execute("SELECT host, pattern, url_representative, score, raisons, nb, "
+                    "http_status, tech, in_scope FROM leads WHERE score >= %s "
+                    "ORDER BY score DESC, nb DESC", (seuil,))
+        cols = [d[0] for d in cur.description]
+        return [dict(zip(cols, r)) for r in cur.fetchall()]
+
+
 def main(argv):
-    seuil = int(argv[0]) if argv and argv[0].isdigit() else 1
-    lignes, st = construire(seuil)
-    print("=== LEADS (seuil score>=%d) : brut %d -> 1b %d (hors-cible exclus %d) -> 1c %d ==="
-          % (seuil, st["brut"], st["apres_1b"], st["exclus_hors_cible"], st["apres_1c"]))
+    seuil = next((int(a) for a in argv if a.isdigit()), 1)
+    if "--rebuild" in argv:  # recalcule (1b+1c) et remplace la table
+        lignes, st = construire(seuil)
+        n = persister(lignes)
+        print("=== REBUILD leads (seuil>=%d) : brut %d -> 1b %d (hors-scope exclus %d) "
+              "-> 1c %d => %d persistés ===" % (seuil, st["brut"], st["apres_1b"],
+                                                st["exclus_hors_cible"], st["apres_1c"], n))
+
+    # AFFICHAGE + EXPORT : lecture depuis la table `leads`, pas de recalcul.
+    lignes = lire(seuil)
     print("%-5s %-4s %-40s %s" % ("score", "nb", "host", "pattern"))
     for r in lignes[:40]:
         print("%-5d %-4d %-40s %s" % (r["score"], r["nb"], r["host"][:40], r["pattern"][:80]))
-    csv = None
     if "--csv" in argv:
-        csv = argv[argv.index("--csv") + 1]
+        chemin = argv[argv.index("--csv") + 1]
         import csv as _csv
-        with open(csv, "w", newline="", encoding="utf-8") as fh:
-            w = _csv.writer(fh); w.writerow(["score", "nb", "host", "pattern", "exemple"])
+        with open(chemin, "w", newline="", encoding="utf-8") as fh:
+            w = _csv.writer(fh)
+            w.writerow(["score", "nb", "host", "pattern", "url_representative",
+                        "http_status", "in_scope", "raisons"])
             for r in lignes:
-                w.writerow([r["score"], r["nb"], r["host"], r["pattern"], r["exemple"]])
-        print("CSV -> %s (%d lignes)" % (csv, len(lignes)))
+                w.writerow([r["score"], r["nb"], r["host"], r["pattern"],
+                            r["url_representative"], r["http_status"], r["in_scope"],
+                            ",".join(r["raisons"] or [])])
+        print("CSV (depuis la table leads) -> %s (%d lignes)" % (chemin, len(lignes)))
     return 0
 
 

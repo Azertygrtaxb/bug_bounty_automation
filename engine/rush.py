@@ -89,6 +89,7 @@ def main(argv):
     sh = [app.send_task("discover_shallow", args=[h]) for h in hosts]
     t_shallow = _wait_all(sh, "TIER1 shallow")
     app.send_task("score_targets").get(timeout=180)
+    app.send_task("rebuild_leads").get(timeout=180)  # vue curée persistée (table leads)
 
     live, dead = _rank(hosts)
     print("\n--- KILL tier 1 : %d morts (0 ligne) / %d hosts ---" % (len(dead), len(hosts)))

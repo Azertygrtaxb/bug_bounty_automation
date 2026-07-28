@@ -89,3 +89,14 @@ def score_targets():
                 scored += 1
         conn.commit()
     return {"scored": scored}
+
+
+@app.task(name="rebuild_leads")
+def rebuild_leads(seuil=1):
+    """Régénère la vue curée `leads` (source de vérité) après score_targets : applique
+    la MÊME logique que engine/leads.py (1b scope + 1c collapse) et REMPLACE la table.
+    targets (détail par endpoint) reste intacte."""
+    from engine import leads
+    lignes, st = leads.construire(seuil)
+    n = leads.persister(lignes)
+    return {"persistes": n, **st}
