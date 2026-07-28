@@ -89,6 +89,13 @@ STATUT_DEFAUT = "a_voir"
 # supprime jamais (§0.4). Le quota s'applique à la LECTURE ; la table `leads` garde tout.
 MAX_LEADS_PAR_HOST = int(os.environ.get("MAX_LEADS_PAR_HOST", "5"))
 
+# --- Rush : attente des tâches Celery (_wait_all). Le timeout s'ADAPTE au parc — sur 48k
+# hosts un plafond fixe décrocherait au bout de 40 min et le classement serait calculé sur
+# un tier 1 partiel (silencieusement FAUX). Éditable §14.
+TIMEOUT_PAR_TACHE = int(os.environ.get("TIMEOUT_PAR_TACHE", "20"))  # s alloués par tâche
+TIMEOUT_MIN = int(os.environ.get("TIMEOUT_MIN", "2400"))            # plancher (s)
+PROGRESS_SECS = int(os.environ.get("PROGRESS_SECS", "60"))          # cadence des lignes de progression
+
 # --- Ordre d'avancement d'un statut (dernier = le plus avancé). Sert à résoudre une
 # COLLISION quand deux leads statutés se replient sur le même pattern : le plus avancé
 # gagne, les notes sont concaténées (jamais perdre du travail humain).

@@ -1,3 +1,11 @@
+# Secrets et artefacts locaux — versés dans le dépôt (pas d'édition sur le serveur).
 .env
+.env.*
+# le template reste suivi
+!.env.example
+# la liste lancée est locale, jamais committée
+targets.txt
+# export généré (source de vérité = table `leads`)
+leads.csv
 __pycache__/
 *.pyc

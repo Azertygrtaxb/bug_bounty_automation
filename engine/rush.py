@@ -36,16 +36,53 @@ def _hosts_from_argv(argv):
     return [a.strip().lower() for a in argv if a.strip()]
 
 
-def _wait_all(results, label, timeout=2400, poll=5):
-    """Attend la complétion (à travers les retries d'admission). Renvoie le temps."""
+def _fmt_duree(s):
+    if s == float("inf"):
+        return "∞"
+    s = int(s)
+    h, r = divmod(s, 3600)
+    m, sec = divmod(r, 60)
+    return "%dh%02dm" % (h, m) if h else ("%dm%02ds" % (m, sec) if m else "%ds" % sec)
+
+
+def _wait_all(results, label, continuer_si_incomplet=False, poll=5):
+    """Attend la complétion de TOUTES les tâches. R1 : timeout ADAPTÉ au parc
+    (max(TIMEOUT_MIN, n·TIMEOUT_PAR_TACHE)). R2 : à l'expiration on LÈVE (un classement
+    sur un tier partiel est FAUX, pas dégradé) sauf --continuer-si-incomplet. R3 : ligne
+    de progression toutes les PROGRESS_SECS (terminés/total, débit, ETA)."""
+    n = len(results)
+    if n == 0:
+        return 0.0
+    timeout = max(config.TIMEOUT_MIN, n * config.TIMEOUT_PAR_TACHE)
+    print("[%s] attente de %d tâches | timeout %s = max(%ds, %d×%ds)"
+          % (label, n, _fmt_duree(timeout), config.TIMEOUT_MIN, n, config.TIMEOUT_PAR_TACHE))
     t0 = time.time()
-    while time.time() - t0 < timeout:
-        if all(r.ready() for r in results):
+    prochain = config.PROGRESS_SECS
+    while True:
+        termines = sum(1 for r in results if r.ready())
+        if termines >= n:
             break
+        ecoule = time.time() - t0
+        if ecoule >= prochain:
+            prochain += config.PROGRESS_SECS
+            debit = termines / ecoule if ecoule > 0 else 0.0
+            eta = (n - termines) / debit if debit > 0 else float("inf")
+            print("[%s] %d/%d terminés | %s écoulées | %.2f tâches/s | ETA %s"
+                  % (label, termines, n, _fmt_duree(ecoule), debit, _fmt_duree(eta)))
+        if ecoule >= timeout:
+            reste = n - termines
+            msg = ("[%s] TIMEOUT %s atteint : %d/%d tâches NON terminées. Un classement sur "
+                   "un tier partiel est FAUX. Augmente TIMEOUT_PAR_TACHE, relance, ou passe "
+                   "--continuer-si-incomplet en connaissance de cause."
+                   % (label, _fmt_duree(timeout), reste, n))
+            if continuer_si_incomplet:
+                sys.stderr.write("AVERTISSEMENT — " + msg + "\n")
+                break
+            raise RuntimeError(msg)
         time.sleep(poll)
     dt = time.time() - t0
     ok = sum(1 for r in results if r.successful())
-    print("[%s] %d/%d terminés en %.0fs" % (label, ok, len(results), dt))
+    print("[%s] %d/%d réussis en %s" % (label, ok, n, _fmt_duree(dt)))
     return dt
 
 
@@ -74,9 +111,14 @@ def _rank(hosts):
 
 
 def main(argv):
+    # R2 : par défaut un tier partiel FAIT ÉCHOUER le rush ; --continuer-si-incomplet
+    # autorise explicitement à poursuivre sur un parc incomplet (résultat assumé faux).
+    continuer = "--continuer-si-incomplet" in argv
+    argv = [a for a in argv if a != "--continuer-si-incomplet"]
     hosts = _hosts_from_argv(argv)
     if not hosts:
-        print("usage: python engine/rush.py host1 host2 ... | --file hosts.txt")
+        print("usage: python engine/rush.py host1 host2 ... | --file hosts.txt "
+              "[--continuer-si-incomplet]")
         return 1
     # SCOPE dérivé de la liste lancée (registered-domains) -> persisté ; la vue leads
     # filtre dessus. Aucune allowlist à la main.
@@ -87,7 +129,7 @@ def main(argv):
 
     # --- TIER 1 : SHALLOW sur TOUS ---
     sh = [app.send_task("discover_shallow", args=[h]) for h in hosts]
-    t_shallow = _wait_all(sh, "TIER1 shallow")
+    t_shallow = _wait_all(sh, "TIER1 shallow", continuer_si_incomplet=continuer)
     app.send_task("score_targets").get(timeout=180)
     app.send_task("rebuild_leads").get(timeout=180)  # vue curée persistée (table leads)
 
@@ -114,11 +156,11 @@ def main(argv):
 
     # --- TIER 2 : DEEP sur le top, dans l'ordre ---
     dp = [app.send_task("discover_deep", args=[h]) for h in deep]  # enqueue = ordre de rang
-    t_deep = _wait_all(dp, "TIER2 deep") if dp else 0.0
+    t_deep = _wait_all(dp, "TIER2 deep", continuer_si_incomplet=continuer)
 
     # --- Sonde sur les deep (enregistre le WAF centralement) ---
     pr = [app.send_task("probe_idor_candidates", args=[h]) for h in deep]
-    _wait_all(pr, "TIER2 sonde") if pr else None
+    _wait_all(pr, "TIER2 sonde", continuer_si_incomplet=continuer)
 
     print("\n=== MÉTRIQUES BRUTES ===")
     print("hosts totaux        : %d" % len(hosts))
