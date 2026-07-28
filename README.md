@@ -120,3 +120,24 @@ l'hôte), arrête Caddy, puis `ssh -L 8080:localhost:8080 root@<vps>` → http:/
 
 postgres et redis n'ont **aucun** port publié (réseau Docker interne). Accès DB depuis
 l'hôte : `docker compose exec postgres psql -U <user> -d <db>`.
+
+## Juge sémantique (repêchage LLM du résidu)
+
+Un juge LLM **aveugle** relit les corps **déjà stockés** (aucun re-fetch réseau) pour
+REPÊCHER le résidu que le déterministe ne voit pas — il ne démote pas. Verdict `applicatif`
+→ +3, `surface_auth` → +2, plafonné à `PLAFOND_SEM` (5) : un repêchage ne passe jamais
+devant un vrai signal (id +6, fingerprint +8). Raison portée explicite (`semantique_applicatif(+3)`).
+
+- **Clé** : `ANTHROPIC_API_KEY` dans le bloc `environment:` du **service worker** uniquement
+  (le worker n'a pas d'`env_file`). **Jamais** dans le service board (exposé). Vide →
+  `juger_semantique` refuse avec un message explicite. `.env` est gitignoré.
+- **Qui est jugé** : le résidu (score 0..`SEUIL_RESIDU`, vivant, non-asset par URL **et** par
+  content-type, non déjà jugé). Un endpoint jugé n'est jamais re-jugé (`semantique_juge_le`).
+- **Lot** : API Batches (50% moins cher), réassocié par `custom_id`. Plafond de dépense
+  côté code `MAX_APPELS_JUGE_PAR_RUN`.
+
+```bash
+# migrations à jour (…→012) ; ANTHROPIC_API_KEY renseignée pour le worker ; puis :
+docker compose exec worker python -c "from engine.semantique_run import juger_semantique; print(juger_semantique(limite=300))"
+docker compose exec worker python -c "from engine.scoring.score import score_targets, rebuild_leads; score_targets(); rebuild_leads()"
+```

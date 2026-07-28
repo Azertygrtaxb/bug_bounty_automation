@@ -40,6 +40,9 @@ services:
       SEUIL_DEEP: "5"                  # TIER2 : score shallow mini pour promouvoir en deep
       SEUIL_DEEP_SURFACE: "20"         # TIER2 : ou surface (nb URLs) mini
       MAX_DEEP_HOSTS: "10"             # TIER2 : plafond de hosts deep-traités / fenêtre
+      # Juge sémantique (S5.1) : clé UNIQUEMENT ici (le worker appelle le LLM). JAMAIS dans
+      # le service board (exposé sur Internet). Le worker n'a pas d'env_file -> la déclarer ici.
+      ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY:-}"
     depends_on:
       postgres:
         condition: service_healthy

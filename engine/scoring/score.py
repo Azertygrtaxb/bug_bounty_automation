@@ -13,12 +13,13 @@ from psycopg.types.json import Json
 
 from engine.celery_app import app
 from engine.gate import gate
-from knowledge import signaux, substance
+from knowledge import semantique, signaux, substance
 
 DATABASE_URL = os.environ["DATABASE_URL"]
 
 _COLS = ("id, url, host, http_status, tech, tags, body_hash, body_len, "
-         "first_hop_status, first_hop_location, body_text, response_headers")
+         "first_hop_status, first_hop_location, body_text, response_headers, "
+         "semantique_verdict")
 
 
 def _target_dict(url, host, http_status, tech, tags, body_hash, body_len,
@@ -70,7 +71,8 @@ def score_targets():
             catchall = _catchall_par_host(rows)  # {host: {hash: nb}}
 
             for (tid, url, host, http_status, tech, tags, body_hash, body_len,
-                 fh_status, fh_location, body_text, response_headers) in rows:
+                 fh_status, fh_location, body_text, response_headers,
+                 sem_verdict) in rows:
                 host_ca = catchall.get(host, {})
                 is_ca = (body_hash in host_ca if body_hash
                          and not _est_redirection(fh_status) else False)
@@ -78,6 +80,12 @@ def score_targets():
                                       body_len, fh_status, fh_location, is_ca,
                                       host_ca.get(body_hash), body_text, response_headers)
                 score, raisons = signaux.evaluer(target)
+                # S0 : REPÊCHAGE sémantique (bonus borné) SUR le score déterministe, jamais
+                # avant. Le déterministe reste le juge ; le sémantique sort le résidu de l'ombre.
+                if sem_verdict:
+                    score, rk = semantique.composer_priorite(score, sem_verdict)
+                    if rk:
+                        raisons = list(raisons) + [rk]
                 new_tags = {**(tags or {}),
                             "methode": "GET",
                             "scannable": gate.is_scannable(target)}

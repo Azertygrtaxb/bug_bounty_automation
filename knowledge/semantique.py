@@ -32,44 +32,52 @@ POIDS = {
 SEUIL = 2   # |score net| < SEUIL => proche du seuil => incertain (éditable)
 
 # --- Composition avec le score DÉTERMINISTE (câblage de PRIORITÉ) --------------
-# PRINCIPE (§0.4, §4) : un signal priorise, seul le gate supprime. La couche
-# sémantique produit un JUGEMENT -> elle ne supprime JAMAIS (ni score=0, ni retrait).
+# S0 — INVERSION : le sémantique REPÊCHE, il ne démote pas. La vue leads ne garde que
+# score >= 1 ; l'ancienne fonction ne poussait que du 0 vers du négatif -> zéro effet sur
+# le board. Désormais :
+#   'applicatif'     -> + BONUS_APPLICATIF     (sort le candidat de l'ombre)
+#   'surface_auth'   -> + BONUS_SURFACE_AUTH   (+ tag de routage côté task)
+#   'institutionnel' -> dépriorisation bornée conservée (mord seulement si aucun signal det)
+#   'incertain' / 'EXCLU_auth_wall' -> aucun effet
+# GARDE-FOU DUR : le score après bonus est PLAFONNÉ à PLAFOND_SEM (§14). Un repêchage LLM
+# ne doit JAMAIS passer devant un signal déterministe fort (id +6, fingerprint +8, CORS…).
+# Le plafond ne DÉMOTE jamais un score_det déjà supérieur (max()). La raison portée est
+# explicite (`semantique_applicatif(+3)`) pour distinguer dans le board le LLM du code.
 #
-#   FIX 1 : "institutionnel" DÉPRIORISE (pénalité bornée, récupérable), il ne met
-#           jamais score=0 ni ne retire l'endpoint. Une fausse démotion coûte une
-#           place dans la file, jamais la cible.
-#   FIX 2 : le sémantique est SUBORDONNÉ au déterministe. Dès que le score
-#           déterministe (signaux.py) porte un vrai signal (>= plancher), le verdict
-#           "institutionnel" est IGNORÉ : le score déterministe est un PLANCHER que
-#           le sémantique ne peut pas percer. Le sémantique ne mord donc QUE sur le
-#           résidu sans aucun signal déterministe.
-#
-# NB : les démotions DÉTERMINISTES de signaux.py/substance.py (catch-all, page
-# d'erreur, redirection canonique, url malformée -> score=0) sont des FAITS
-# mécaniques (§6), pas du jugement : elles ne sont PAS touchées ici.
+# NB : les démotions DÉTERMINISTES (catch-all, page d'erreur, redirection, url malformée
+# -> 0) sont des FAITS mécaniques (§6), pas du jugement : NON touchées ici.
 SIGNAL_DET_PLANCHER = 1        # score déterministe >= ce seuil = vrai signal (éditable)
 PENALITE_INSTITUTIONNEL = 3    # dépriorisation BORNÉE (fond de file), récupérable (éditable)
 
 
-def composer_priorite(score_det, verdict_sem):
-    """Compose le score DÉTERMINISTE (plancher) avec le VERDICT sémantique.
-    Renvoie (priorite, note). Ne met JAMAIS l'endpoint à 0 par jugement, ne le
-    retire jamais : au pire un fond de file borné et récupérable.
+def _repecher(score_det, bonus, nom):
+    """Bonus borné par PLAFOND_SEM, jamais démotant. Renvoie (priorite, raison|None)."""
+    from knowledge import config
+    priorite = max(score_det, min(score_det + bonus, config.PLAFOND_SEM))
+    delta = priorite - score_det
+    if delta <= 0:
+        return score_det, None
+    return priorite, "semantique_%s(+%d)" % (nom, delta)
 
-    score_det : score final de signaux.evaluer() (démotions mécaniques déjà appliquées).
-    verdict_sem : 'institutionnel' | 'applicatif' | 'surface_auth' | 'incertain' |
-                  'EXCLU_auth_wall' (ce dernier n'est pas un verdict de contenu :
-                  l'endpoint n'a pas été jugé, on renvoie le score déterministe tel quel)."""
-    if verdict_sem != "institutionnel":
-        # applicatif / surface_auth / incertain / exclu : le sémantique ne démote pas.
-        return score_det, "sémantique ne mord pas (%s)" % verdict_sem
-    if score_det >= SIGNAL_DET_PLANCHER:
-        return score_det, ("institutionnel IGNORÉ — signal déterministe %d >= plancher %d"
-                           % (score_det, SIGNAL_DET_PLANCHER))
-    # aucun signal déterministe : dépriorisation bornée, récupérable, JAMAIS retiré.
-    return (score_det - PENALITE_INSTITUTIONNEL,
-            "institutionnel -> déprioritisé (-%d), reste en file, récupérable"
-            % PENALITE_INSTITUTIONNEL)
+
+def composer_priorite(score_det, verdict_sem):
+    """Compose le score DÉTERMINISTE avec le VERDICT sémantique. Renvoie (priorite, raison).
+    `raison` = token à ajouter aux score_raisons (None si aucun changement).
+
+    verdict_sem : 'applicatif' | 'surface_auth' | 'institutionnel' | 'incertain' |
+                  'EXCLU_auth_wall'."""
+    from knowledge import config
+    if verdict_sem == "applicatif":
+        return _repecher(score_det, config.BONUS_APPLICATIF, "applicatif")
+    if verdict_sem == "surface_auth":
+        return _repecher(score_det, config.BONUS_SURFACE_AUTH, "surface_auth")
+    if verdict_sem == "institutionnel":
+        if score_det >= SIGNAL_DET_PLANCHER:
+            return score_det, None     # subordonné au déterministe : ignoré
+        return (score_det - PENALITE_INSTITUTIONNEL,
+                "semantique_institutionnel(-%d)" % PENALITE_INSTITUTIONNEL)
+    # incertain / EXCLU_auth_wall / inconnu : aucun effet
+    return score_det, None
 
 
 def decider(faits):

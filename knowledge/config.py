@@ -121,6 +121,20 @@ EXTRAIT_CORPS_MAX = int(os.environ.get("EXTRAIT_CORPS_MAX", "2000"))
 # d'affichage, pas un masquage — la donnée est déjà chargée). Éditable §14.
 AFFICHAGE_MAX_LEADS_PAR_GROUPE = int(os.environ.get("AFFICHAGE_MAX_LEADS_PAR_GROUPE", "50"))
 
+# --- Couche sémantique (juge LLM AVEUGLE sur le corps déjà stocké) ------------------
+# Le sémantique REPÊCHE le résidu (score bas) que le déterministe ne voit pas ; il ne
+# démote pas (sauf 'institutionnel', dépriorisation bornée). Plafonné pour ne jamais
+# passer devant un vrai signal déterministe. AUCUNE requête réseau vers les cibles.
+MODELE_JUGE = os.environ.get("MODELE_JUGE", "claude-sonnet-5")
+EFFORT_JUGE = os.environ.get("EFFORT_JUGE", "low")
+EXTRAIT_JUGE_MAX = int(os.environ.get("EXTRAIT_JUGE_MAX", "4000"))   # coût n°1 : le corps pèse 10x la réponse
+SEUIL_RESIDU = int(os.environ.get("SEUIL_RESIDU", "4"))             # on ne juge que score 0..SEUIL_RESIDU
+ECHANTILLON_SEM = int(os.environ.get("ECHANTILLON_SEM", "300"))
+MAX_APPELS_JUGE_PAR_RUN = int(os.environ.get("MAX_APPELS_JUGE_PAR_RUN", "300"))  # plafond dépense côté code
+BONUS_APPLICATIF = int(os.environ.get("BONUS_APPLICATIF", "3"))
+BONUS_SURFACE_AUTH = int(os.environ.get("BONUS_SURFACE_AUTH", "2"))
+PLAFOND_SEM = int(os.environ.get("PLAFOND_SEM", "5"))              # garde-fou dur : plafond après bonus sémantique
+
 # --- Anti-bruteforce du login board : au-delà de BOARD_MAX_ECHECS tentatives ratées par
 # (compte, IP) dans BOARD_FENETRE_ECHECS secondes -> 429, sans comparer le mot de passe.
 BOARD_MAX_ECHECS = int(os.environ.get("BOARD_MAX_ECHECS", "5"))

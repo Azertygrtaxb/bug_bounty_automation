@@ -13,6 +13,6 @@ app = Celery(
     broker=BROKER_URL,
     backend=RESULT_BACKEND,
     include=["engine.tasks", "engine.recon.discover", "engine.scoring.score",
-             "engine.probe.probe"],
+             "engine.probe.probe", "engine.semantique_run"],
 )
 app.conf.result_expires = 3600
