@@ -31,6 +31,7 @@ import os
 import sys
 import threading
 import time
+from collections import Counter
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -211,6 +212,41 @@ def _filtrer(rows, host=None, statut=None, in_scope=None, q=None, depuis=None):
     return out
 
 
+def _agreger_hosts(rows):
+    """G1 — une ligne par host à partir des MÊMES leads (déjà filtrés). Aucune ligne
+    'repli' (appelé sur quota=False). Tri : score_max DESC puis nb_leads DESC."""
+    s24 = _now() - timedelta(hours=24)
+    par = {}
+    for r in rows:
+        h = r.get("host")
+        g = par.get(h)
+        if g is None:
+            g = par[h] = {"host": h, "nb_leads": 0, "score_max": 0, "nb_nouveaux": 0,
+                          "statuts": {s: 0 for s in config.STATUTS_LEAD},
+                          "url_representative": None, "_tech": Counter(), "_smax": -1}
+        g["nb_leads"] += 1
+        sc = r.get("score") or 0
+        if sc > g["_smax"]:
+            g["_smax"] = sc
+            g["score_max"] = sc
+            g["url_representative"] = r.get("url_representative")
+        st = r.get("statut") or config.STATUT_DEFAUT
+        if st in g["statuts"]:
+            g["statuts"][st] += 1
+        pv = r.get("premiere_vue")
+        if pv is not None and pv >= s24:
+            g["nb_nouveaux"] += 1
+        for t in (r.get("tech") or []):
+            g["_tech"][t] += 1
+    out = []
+    for g in par.values():
+        g["tech"] = [t for t, _ in g["_tech"].most_common(5)]
+        del g["_tech"], g["_smax"]
+        out.append(g)
+    out.sort(key=lambda x: (x["score_max"], x["nb_leads"]), reverse=True)
+    return out
+
+
 def _json_default(o):
     if isinstance(o, datetime):
         return o.isoformat()
@@ -323,6 +359,17 @@ class Handler(BaseHTTPRequestHandler):
                 rows = leads._appliquer_quota(rows)
             return self._envoyer(200, {"count": len(rows), "leads": rows})
 
+        if u.path == "/api/hosts":   # G1 : agrégation par host des MÊMES leads filtrés
+            if not self._garde():
+                return
+            seuil = int(one("min_score", "1") or 1)
+            in_scope = None if one("in_scope") in (None, "") else (one("in_scope") in ("1", "true"))
+            rows = leads.lire(seuil, quota=False)   # quota inutile ici : le groupement le remplace
+            rows = _filtrer(rows, host=one("host"), statut=one("statut"), in_scope=in_scope,
+                            q=one("q"), depuis=_parse_depuis(one("nouveaux_depuis")))
+            hosts = _agreger_hosts(rows)
+            return self._envoyer(200, {"count": len(hosts), "hosts": hosts})
+
         if u.path == "/api/leads/masques":
             if not self._garde():
                 return
@@ -356,6 +403,17 @@ class Handler(BaseHTTPRequestHandler):
 
         return self._envoyer(404, {"erreur": "route inconnue"})
 
+    def do_HEAD(self):
+        """P1 — liveness pour la supervision (curl -I). 200 + en-têtes, AUCUN corps, aucune
+        donnée : un simple ping « le board est debout » (avant, HEAD renvoyait 501)."""
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", "0")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Content-Security-Policy", Handler._CSP)
+        self.send_header("X-Frame-Options", "DENY")
+        self.end_headers()
+
     def _stats(self):
         rows = leads.lire(1, quota=False)
         par_statut, par_host = {}, {}
@@ -373,7 +431,8 @@ class Handler(BaseHTTPRequestHandler):
         top = sorted(par_host.items(), key=lambda kv: kv[1], reverse=True)[:10]
         return {"total": len(rows), "par_statut": par_statut,
                 "par_host": [{"host": h, "n": n} for h, n in top],
-                "nouveaux_24h": n24, "nouveaux_7j": n7}
+                "nouveaux_24h": n24, "nouveaux_7j": n7,
+                "max_leads_par_groupe": config.AFFICHAGE_MAX_LEADS_PAR_GROUPE}
 
     # --- écriture (leads_statut uniquement) ---
     def do_POST(self):
@@ -420,6 +479,22 @@ def _outil_hash():
     return 0
 
 
+def _tester_base():
+    """P3 — teste la connexion base UNE fois au boot, message clair au lieu d'une trace
+    psycopg brute à chaque requête + 502 côté client. Renvoie None si OK, sinon un message."""
+    import psycopg
+    user = urlsplit(leads.DATABASE_URL).username or "?"
+    try:
+        with psycopg.connect(leads.DATABASE_URL, connect_timeout=5) as c, c.cursor() as cur:
+            cur.execute("SELECT 1")
+        return None
+    except psycopg.OperationalError as e:
+        m = str(e).lower()
+        if "password" in m or "authentication" in m or "role" in m:
+            return "identifiants base refusés pour l'utilisateur '%s'" % user
+        return "base injoignable (%s)" % str(e).strip().splitlines()[0]
+
+
 def main():
     if "--hash-pass" in sys.argv[1:]:
         return _outil_hash()
@@ -428,11 +503,23 @@ def main():
                          "(board partagé) -> BOARD_ACCOUNTS='alice:<hash>,bob:<hash>' "
                          "(génère les hash : python engine/board.py --hash-pass).\n")
         return 2
-    for u, secret in COMPTES.items():   # rétro-compat : avertir si un mdp est en clair
-        if not _est_hache(secret):
+    # P2 : un hash pbkdf2 mal collé (≠ 4 morceaux) produit des 401 muets -> refuse, nomme le compte.
+    for u, secret in COMPTES.items():
+        if secret.startswith("pbkdf2") and len(secret.split("$")) != 4:
+            sys.stderr.write("[board] REFUS de démarrer : le compte '%s' a un hash pbkdf2 "
+                             "MALFORMÉ (attendu 'pbkdf2$iter$sel$hash', 4 morceaux ; %d trouvés). "
+                             "Regénère : python engine/board.py --hash-pass\n"
+                             % (u, len(secret.split("$"))))
+            return 2
+        if not _est_hache(secret):   # rétro-compat : avertir si un mdp est en clair
             sys.stderr.write("[board] AVERTISSEMENT : le compte '%s' a un mot de passe EN "
                              "CLAIR dans l'environnement. Hache-le : python engine/board.py "
                              "--hash-pass\n" % u)
+    # P3 : base testée une fois, message explicite.
+    err = _tester_base()
+    if err:
+        sys.stderr.write("[board] REFUS de démarrer : %s.\n" % err)
+        return 2
     mode = "EXPOSÉ (0.0.0.0)" if EXPOSE else "localhost/tunnel"
     sys.stderr.write("[board] http://%s:%d — %s — login obligatoire, %d compte(s)\n"
                      % (BIND, PORT, mode, len(COMPTES)))

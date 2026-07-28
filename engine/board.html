@@ -17,9 +17,10 @@
   h1{font-size:15px;margin:0;color:var(--acc)}
   .stats{color:var(--mut);font-size:12px}
   .stats b{color:var(--fg)}
+  button{font:inherit;cursor:pointer}
+  #btn-vue{background:var(--panel2);border:1px solid var(--acc);color:var(--acc);border-radius:6px;padding:5px 11px}
   .filters{display:flex;gap:8px;flex-wrap:wrap;align-items:center;padding:8px 14px;border-bottom:1px solid var(--border);background:var(--panel)}
-  input,select,button{font:inherit}
-  input,select{background:var(--panel2);color:var(--fg);border:1px solid var(--border);border-radius:5px;padding:4px 7px}
+  input,select{font:inherit;background:var(--panel2);color:var(--fg);border:1px solid var(--border);border-radius:5px;padding:4px 7px}
   input[type=number]{width:72px}
   .chip{background:var(--panel2);border:1px solid var(--border);color:var(--mut);border-radius:5px;padding:4px 9px;cursor:pointer}
   .chip.on{border-color:var(--acc);color:var(--acc)}
@@ -33,10 +34,15 @@
   .pat:hover{text-decoration-color:var(--acc)}
   a.url{color:var(--link);text-decoration:none}
   a.url:hover{text-decoration:underline}
-  .reasons{color:var(--mut);font-size:11px}
-  .tech{color:var(--mut);font-size:11px}
+  .reasons,.tech{color:var(--mut);font-size:11px}
+  .hint{color:var(--acc);font-size:11px}
   .badge{display:inline-block;padding:0 6px;border-radius:9px;font-size:10px;font-weight:700;border:1px solid}
   .badge.new{color:var(--new);border-color:var(--new)}
+  .pill{display:inline-block;padding:0 6px;border-radius:9px;font-size:10px;border:1px solid;margin-right:2px}
+  .pill.a_voir{color:var(--avoir);border-color:var(--avoir)}
+  .pill.en_cours{color:var(--encours);border-color:var(--encours)}
+  .pill.tue{color:var(--tue);border-color:var(--tue)}
+  .pill.rapporte{color:var(--rapporte);border-color:var(--rapporte)}
   .st-btns{display:flex;gap:3px;margin-bottom:3px}
   .st-btns b{padding:2px 6px;border:1px solid var(--border);border-radius:5px;cursor:pointer;font-weight:600;color:var(--mut);font-size:11px}
   .st-btns b.sel[data-s=a_voir]{color:var(--avoir);border-color:var(--avoir)}
@@ -46,6 +52,11 @@
   .by{color:var(--mut);font-size:10px;margin:1px 0}
   .note{width:100%;background:var(--bg);border:1px solid var(--border);color:var(--mut);border-radius:4px;padding:2px 5px;font-size:11px}
   tr.tue td{opacity:.5}
+  tr.grp td{background:#141a24;cursor:pointer;font-weight:600}
+  tr.grp:hover td{background:#1a2130}
+  tr.sub td{border-left:2px solid var(--border)}
+  tr.sub.cache{display:none}
+  tr.more td{color:var(--acc);cursor:pointer;font-style:italic}
   tr.repli td{background:#141a24;color:var(--mut);cursor:pointer;font-style:italic}
   tr.repli:hover td{background:#1a2130}
   #orph{padding:8px 14px;background:#2d1418;border-bottom:1px solid var(--tue);color:#ffb4ab;font-size:12px;display:none}
@@ -62,6 +73,7 @@
 <body>
 <header>
   <h1>🎯 Lead Board</h1>
+  <button id="btn-vue">vue</button>
   <span class="stats" id="stats">…</span>
 </header>
 <div class="filters">
@@ -79,12 +91,12 @@
   <span class="chip" data-depuis="" id="d-all">tout</span>
   <span class="chip" data-depuis="24h">depuis hier</span>
   <span class="chip" data-depuis="7j">7 jours</span>
-  <label style="color:var(--mut)"><input type="checkbox" id="quota" checked> quota</label>
+  <label class="k" title="vue à plat seulement"><input type="checkbox" id="quota" checked> quota (à plat)</label>
 </div>
 <div id="orph"></div>
 <table id="tbl">
   <thead><tr>
-    <th>score</th><th>nb</th><th>statut / note</th><th>host</th><th>pattern</th>
+    <th>score</th><th>nb</th><th>statut</th><th>host</th><th>pattern / déplier</th>
     <th>http</th><th>tech</th><th>raisons</th>
   </tr></thead>
   <tbody id="rows"></tbody>
@@ -94,8 +106,12 @@
 
 <script>
 const STATUTS=["a_voir","en_cours","tue","rapporte"];
+const LBL={a_voir:"à voir",en_cours:"en cours",tue:"tué",rapporte:"rapporté"};
 const $=id=>document.getElementById(id);
 let depuis="";
+let vue=localStorage.getItem("board_vue")||"groupe";
+let MAXG=50, GID=0;
+const GROUPES={};   // gid -> {host, leads:[], trHost}
 
 function params(){
   const p=new URLSearchParams();
@@ -109,97 +125,155 @@ function params(){
   return p;
 }
 function esc(s){return (s==null?"":String(s)).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]))}
-// esc() échappe le HTML, pas le SCHÉMA : ne rendre un lien que pour http(s), sinon texte nu
-// (une URL javascript:/data: récoltée au crawl ne doit jamais être cliquable).
+// esc() échappe le HTML, pas le SCHÉMA : ne rendre un lien que pour http(s), sinon texte nu.
 function lien(u){
   if(!u) return "";
   return /^https?:\/\//i.test(u)
     ? `<a class="url" href="${esc(u)}" target="_blank" rel="noopener noreferrer">${esc(u)}</a>`
     : `<span class="url" title="schéma non http(s), non cliquable">${esc(u)}</span>`;
 }
+function badgeNouveau(n){return n>0?`<span class="badge new">${n} nouv.</span>`:""}
+function pastilles(s){
+  const p=STATUTS.filter(k=>s[k]).map(k=>`<span class="pill ${k}">${s[k]} ${LBL[k]}</span>`).join(" ");
+  return p||`<span class="k">—</span>`;
+}
 
-async function charger(){
-  const st=await (await fetch("/api/stats")).json();
+// ---------- ligne de lead (partagée par les deux vues) ----------
+function btns(r){
+  return `<div class="st-btns">`+STATUTS.map(s=>`<b data-s="${s}" class="${r.statut===s?'sel':''}">${s}</b>`).join("")+`</div>`+
+    `<div class="by">${r.par_qui?('par '+esc(r.par_qui)):''}</div>`;
+}
+function ligneLeadHTML(r){
+  const nouveau=r.premiere_vue&&(Date.now()-Date.parse(r.premiere_vue)<864e5);
+  const url=r.url_representative;
+  return `
+    <td class="sc">${r.score}</td>
+    <td class="nb">${r.nb??""}</td>
+    <td>${btns(r)}<input class="note" placeholder="note…" value="${esc(r.note)}"></td>
+    <td>${esc(r.host)}</td>
+    <td><span class="pat">${esc(r.pattern)}</span>${nouveau?' <span class="badge new">NOUVEAU</span>':''}${url?"<br>"+lien(url):""}</td>
+    <td class="k">${esc(r.http_status)}</td>
+    <td class="tech">${esc((r.tech||[]).join(", "))}</td>
+    <td class="reasons">${esc((r.raisons||[]).join(", "))}</td>`;
+}
+function wireLead(tr,r,gid){
+  const note=tr.querySelector(".note");
+  const pat=tr.querySelector(".pat");
+  if(pat)pat.onclick=(e)=>{e.stopPropagation();detail(r.host,r.pattern);};
+  tr.querySelectorAll(".st-btns b").forEach(b=>b.onclick=async(e)=>{
+    e.stopPropagation();
+    const s=b.dataset.s;
+    const res=await fetch("/api/leads/statut",{method:"POST",
+      headers:{"Content-Type":"application/json","X-Board":"1"},
+      body:JSON.stringify({host:r.host,pattern:r.pattern,statut:s,note:note?note.value:null})});
+    if(!res.ok){alert("statut refusé: "+((await res.json()).erreur||res.status));return;}
+    const jr=await res.json(); r.statut=s; r.par_qui=jr.par;
+    tr.querySelectorAll(".st-btns b").forEach(x=>x.classList.toggle("sel",x.dataset.s===s));
+    tr.classList.toggle("tue",s==="tue");
+    const by=tr.querySelector(".by"); if(by)by.textContent=jr.par?("par "+jr.par):"";
+    if(gid)majHost(gid);   // recalcule les pastilles du groupe SANS recharger
+  });
+}
+
+// ---------- stats + orphelins ----------
+async function chargerStats(){
+  const st=await(await fetch("/api/stats")).json();
+  MAXG=st.max_leads_par_groupe||50;
   $("stats").innerHTML=`<b>${st.total}</b> leads · nouveaux <b>${st.nouveaux_24h}</b>/24h <b>${st.nouveaux_7j}</b>/7j · `+
     Object.entries(st.par_statut).map(([k,v])=>`${k}:<b>${v}</b>`).join(" · ");
-  const o=await (await fetch("/api/orphelins")).json();
+  const o=await(await fetch("/api/orphelins")).json();
   if(o.count>0){$("orph").style.display="block";
-    $("orph").innerHTML=`⚠ ${o.count} statut(s) ORPHELIN(S) (jamais supprimés) : `+
+    $("orph").innerHTML=`⚠ ${o.count} statut(s) ORPHELIN(S) : `+
       o.orphelins.map(x=>`<code>[${esc(x.statut)}] ${esc(x.host)} ${esc(x.pattern)}</code>`).join(" — ");
   } else $("orph").style.display="none";
+}
 
-  const d=await (await fetch("/api/leads?"+params())).json();
-  const tb=$("rows");tb.innerHTML="";
+// ---------- VUE GROUPÉE (par host) ----------
+async function chargerGroupe(){
+  const d=await(await fetch("/api/hosts?"+params())).json();
+  const tb=$("rows"); tb.innerHTML="";
   $("empty").style.display=d.count?"none":"block";
-  const now=Date.now();
+  for(const h of d.hosts){
+    const gid=++GID;
+    const tr=document.createElement("tr"); tr.className="grp"; tr.dataset.host=h.host;
+    tr.innerHTML=`
+      <td class="sc">${h.score_max}</td>
+      <td class="nb">${h.nb_leads}</td>
+      <td class="past">${pastilles(h.statuts)}</td>
+      <td>${esc(h.host)} ${badgeNouveau(h.nb_nouveaux)}</td>
+      <td class="hint">▸ déplier</td><td></td>
+      <td class="tech">${esc((h.tech||[]).join(", "))}</td><td></td>`;
+    tr.onclick=()=>toggleGroupe(tr,h,gid);
+    tb.appendChild(tr);
+  }
+}
+async function toggleGroupe(trHost,h,gid){
+  if(trHost.dataset.open==="1"){
+    document.querySelectorAll(`tr.sub[data-g="${gid}"]`).forEach(x=>x.remove());
+    trHost.dataset.open=""; trHost.querySelector(".hint").textContent="▸ déplier"; return;
+  }
+  trHost.dataset.open="1"; trHost.querySelector(".hint").textContent="▾ replier";
+  const p=params(); p.set("host",h.host); p.set("quota","0");
+  const d=await(await fetch("/api/leads?"+p)).json();
+  const lst=(d.leads||[]).filter(r=>r.type!=="repli");
+  GROUPES[gid]={host:h.host,leads:lst,trHost:trHost};
+  let anchor=trHost;
+  lst.forEach((r,i)=>{
+    const tr=document.createElement("tr"); tr.className="sub"+(i>=MAXG?" cache":""); tr.dataset.g=gid;
+    if(r.statut==="tue")tr.classList.add("tue");
+    tr.innerHTML=ligneLeadHTML(r); wireLead(tr,r,gid);
+    anchor.after(tr); anchor=tr;
+  });
+  if(lst.length>MAXG){
+    const b=document.createElement("tr"); b.className="sub more"; b.dataset.g=gid;
+    b.innerHTML=`<td></td><td></td><td colspan="6">… voir les ${lst.length-MAXG} restants (${MAXG} affichés)</td>`;
+    b.onclick=(e)=>{e.stopPropagation();
+      document.querySelectorAll(`tr.sub.cache[data-g="${gid}"]`).forEach(x=>x.classList.remove("cache")); b.remove();};
+    anchor.after(b);
+  }
+}
+function majHost(gid){
+  const g=GROUPES[gid]; if(!g)return;
+  const c={a_voir:0,en_cours:0,tue:0,rapporte:0};
+  g.leads.forEach(r=>{const s=r.statut||"a_voir"; if(s in c)c[s]++;});
+  g.trHost.querySelector(".past").innerHTML=pastilles(c);
+}
+
+// ---------- VUE À PLAT (comportement historique, quota + repli) ----------
+async function chargerPlat(){
+  const d=await(await fetch("/api/leads?"+params())).json();
+  const tb=$("rows"); tb.innerHTML="";
+  $("empty").style.display=d.count?"none":"block";
   for(const r of d.leads){
     const tr=document.createElement("tr");
     if(r.type==="repli"){
       tr.className="repli";
       tr.innerHTML=`<td class="sc">${r.score}</td><td></td><td colspan="6">▸ ${esc(r.pattern)} sur <b>${esc(r.host)}</b> — cliquer pour déplier</td>`;
-      tr.onclick=()=>deplier(r.host,tr);
-      tb.appendChild(tr);continue;
+      tr.onclick=()=>deplierPlat(r.host,tr);
+      tb.appendChild(tr); continue;
     }
     if(r.statut==="tue")tr.className="tue";
-    const nouveau = r.premiere_vue && (now-Date.parse(r.premiere_vue) < 24*3600*1000);
-    const url=r.url_representative;
-    tr.innerHTML=`
-      <td class="sc">${r.score}</td>
-      <td class="nb">${r.nb??""}</td>
-      <td>${btns(r)}<input class="note" placeholder="note…" value="${esc(r.note)}"></td>
-      <td>${esc(r.host)}</td>
-      <td><span class="pat">${esc(r.pattern)}</span>${nouveau?' <span class="badge new">NOUVEAU</span>':''}
-          ${url?"<br>"+lien(url):""}</td>
-      <td class="k">${esc(r.http_status)}</td>
-      <td class="tech">${esc((r.tech||[]).join(", "))}</td>
-      <td class="reasons">${esc((r.raisons||[]).join(", "))}</td>`;
-    tr.querySelector(".pat").onclick=()=>detail(r.host,r.pattern);
-    wireBtns(tr,r);
+    tr.innerHTML=ligneLeadHTML(r); wireLead(tr,r);
     tb.appendChild(tr);
   }
 }
-function btns(r){
-  return `<div class="st-btns">`+STATUTS.map(s=>`<b data-s="${s}" class="${r.statut===s?'sel':''}">${s}</b>`).join("")+`</div>`+
-    `<div class="by">${r.par_qui?('par '+esc(r.par_qui)):''}</div>`;
-}
-function wireBtns(tr,r){
-  const note=tr.querySelector(".note");
-  tr.querySelectorAll(".st-btns b").forEach(b=>b.onclick=async()=>{
-    const s=b.dataset.s;
-    const res=await fetch("/api/leads/statut",{method:"POST",
-      headers:{"Content-Type":"application/json","X-Board":"1"},   // X-Board = jeton anti-CSRF
-      body:JSON.stringify({host:r.host,pattern:r.pattern,statut:s,note:note.value||null})});
-    if(!res.ok){alert("statut refusé: "+((await res.json()).erreur||res.status));return;}
-    const j=await res.json();
-    r.statut=s; r.par_qui=j.par;
-    tr.querySelectorAll(".st-btns b").forEach(x=>x.classList.toggle("sel",x.dataset.s===s));
-    tr.classList.toggle("tue",s==="tue");
-    const by=tr.querySelector(".by"); if(by) by.textContent=j.par?("par "+j.par):"";
+async function deplierPlat(host,trRepli){
+  const d=await(await fetch("/api/leads/masques?host="+encodeURIComponent(host))).json();
+  let anchor=trRepli;
+  (d.masques||[]).forEach(r=>{
+    const tr=document.createElement("tr"); if(r.statut==="tue")tr.className="tue";
+    tr.innerHTML=ligneLeadHTML(r); wireLead(tr,r);
+    anchor.after(tr); anchor=tr;
   });
+  trRepli.remove();
 }
-async function deplier(host,trRepli){
-  const d=await (await fetch("/api/leads/masques?host="+encodeURIComponent(host))).json();
-  const frag=document.createDocumentFragment();
-  for(const r of d.masques){
-    const tr=document.createElement("tr");if(r.statut==="tue")tr.className="tue";
-    const url=r.url_representative;
-    tr.innerHTML=`<td class="sc">${r.score}</td><td class="nb">${r.nb??""}</td>
-      <td>${btns(r)}<input class="note" placeholder="note…" value="${esc(r.note)}"></td>
-      <td>${esc(r.host)}</td>
-      <td><span class="pat">${esc(r.pattern)}</span>${url?"<br>"+lien(url):""}</td>
-      <td class="k">${esc(r.http_status)}</td><td class="tech">${esc((r.tech||[]).join(", "))}</td>
-      <td class="reasons">${esc((r.raisons||[]).join(", "))}</td>`;
-    tr.querySelector(".pat").onclick=()=>detail(r.host,r.pattern);
-    wireBtns(tr,r);frag.appendChild(tr);
-  }
-  trRepli.after(frag);trRepli.remove();
-}
+
+// ---------- panneau de détail ----------
 async function detail(host,pattern){
-  const d=await (await fetch(`/api/lead/detail?host=${encodeURIComponent(host)}&pattern=${encodeURIComponent(pattern)}`)).json();
+  const d=await(await fetch(`/api/lead/detail?host=${encodeURIComponent(host)}&pattern=${encodeURIComponent(pattern)}`)).json();
   if(d.erreur){alert(d.erreur);return;}
   const hdr=d.response_headers?Object.entries(d.response_headers).map(([k,v])=>`${esc(k)}: ${esc(v)}`).join("\n"):"(aucun)";
-  const membres=d.membres.map(m=>`<tr><td class="sc">${m.score}</td><td class="k">${esc(m.http_status)}</td>
-     <td>${lien(m.url)}</td></tr>`).join("");
+  const membres=(d.membres||[]).map(m=>`<tr><td class="sc">${m.score}</td><td class="k">${esc(m.http_status)}</td><td>${lien(m.url)}</td></tr>`).join("");
   $("drawer-body").innerHTML=`
     <span class="close" onclick="fermerDrawer()">fermer ✕</span>
     <h2>${esc(host)}</h2><div class="k">${esc(pattern)} — ${d.nb} membre(s)</div>
@@ -211,15 +285,22 @@ async function detail(host,pattern){
 }
 function fermerDrawer(){$("drawer").classList.remove("open")}
 
+// ---------- orchestration ----------
+async function charger(){
+  await chargerStats();
+  if(vue==="groupe") await chargerGroupe(); else await chargerPlat();
+}
+function majBoutonVue(){$("btn-vue").textContent = vue==="groupe" ? "vue : par host ▾" : "vue : à plat ▾";}
+$("btn-vue").onclick=()=>{vue=vue==="groupe"?"plat":"groupe";localStorage.setItem("board_vue",vue);majBoutonVue();charger();};
+majBoutonVue();
+
 document.querySelectorAll(".chip").forEach(c=>c.onclick=()=>{
-  depuis=c.dataset.depuis;
-  document.querySelectorAll(".chip").forEach(x=>x.classList.toggle("on",x===c));
-  charger();
+  depuis=c.dataset.depuis;document.querySelectorAll(".chip").forEach(x=>x.classList.toggle("on",x===c));charger();
 });
 $("d-all").classList.add("on");
 ["min_score","host","q","statut","in_scope","quota"].forEach(id=>{
   const el=$(id);el.addEventListener(el.tagName==="INPUT"&&el.type==="text"?"input":"change",()=>{
-    clearTimeout(window._t);window._t=setTimeout(charger,180);
+    clearTimeout(window._t);window._t=setTimeout(charger,200);
   });
 });
 charger();

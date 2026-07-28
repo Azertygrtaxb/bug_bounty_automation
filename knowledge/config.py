@@ -116,6 +116,11 @@ PARAMS_PAGINATION = {
 # détail (jamais le corps entier dans la page). Éditable §14.
 EXTRAIT_CORPS_MAX = int(os.environ.get("EXTRAIT_CORPS_MAX", "2000"))
 
+# --- Vue groupée par host : au-delà de ce nombre de leads dans UN groupe déplié, l'UI
+# n'en affiche d'abord que les mieux scorés + un bouton « voir les N restants » (pagination
+# d'affichage, pas un masquage — la donnée est déjà chargée). Éditable §14.
+AFFICHAGE_MAX_LEADS_PAR_GROUPE = int(os.environ.get("AFFICHAGE_MAX_LEADS_PAR_GROUPE", "50"))
+
 # --- Anti-bruteforce du login board : au-delà de BOARD_MAX_ECHECS tentatives ratées par
 # (compte, IP) dans BOARD_FENETRE_ECHECS secondes -> 429, sans comparer le mot de passe.
 BOARD_MAX_ECHECS = int(os.environ.get("BOARD_MAX_ECHECS", "5"))
