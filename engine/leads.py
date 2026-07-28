@@ -216,6 +216,7 @@ def _assurer_table(cur):
         " updated_at TIMESTAMPTZ DEFAULT now(), PRIMARY KEY (host, pattern))")
     cur.execute("ALTER TABLE leads_statut ADD COLUMN IF NOT EXISTS orphelin BOOLEAN DEFAULT false")
     cur.execute("ALTER TABLE leads_statut ADD COLUMN IF NOT EXISTS ancre_url TEXT")
+    cur.execute("ALTER TABLE leads_statut ADD COLUMN IF NOT EXISTS par_qui TEXT")
 
 
 def construire(seuil=1):
@@ -429,11 +430,12 @@ def lister_orphelins():
                 for h, p, s, n, a in cur.fetchall()]
 
 
-def marquer(host, pattern, statut, note=None, ancre_url=None):
+def marquer(host, pattern, statut, note=None, ancre_url=None, par=None):
     """UPSERT du statut de triage HUMAIN. Refuse un statut hors STATUTS_LEAD. note=None
     conserve la note existante. ancre_url manquante -> remplie avec le url_representative
-    du lead visé (l'URL réelle que l'humain regardait). AUCUN DDL : compatible avec un
-    rôle postgres SELECT + INSERT/UPDATE sur leads_statut (le board tourne ainsi)."""
+    du lead visé (l'URL réelle que l'humain regardait). `par` = compte qui pose le statut
+    (board partagé). AUCUN DDL : compatible avec un rôle postgres SELECT + INSERT/UPDATE
+    sur leads_statut (le board tourne ainsi)."""
     if statut not in config.STATUTS_LEAD:
         raise ValueError("statut %r invalide (attendus: %s)" % (statut, config.STATUTS_LEAD))
     with psycopg.connect(DATABASE_URL) as conn, conn.cursor() as cur:
@@ -443,11 +445,12 @@ def marquer(host, pattern, statut, note=None, ancre_url=None):
             row = cur.fetchone()
             ancre_url = row[0] if row else None
         cur.execute(
-            "INSERT INTO leads_statut (host, pattern, statut, note, ancre_url, updated_at) "
-            "VALUES (%s, %s, %s, %s, %s, now()) ON CONFLICT (host, pattern) DO UPDATE SET "
+            "INSERT INTO leads_statut (host, pattern, statut, note, ancre_url, par_qui, updated_at) "
+            "VALUES (%s, %s, %s, %s, %s, %s, now()) ON CONFLICT (host, pattern) DO UPDATE SET "
             "statut = EXCLUDED.statut, note = COALESCE(EXCLUDED.note, leads_statut.note), "
-            "ancre_url = COALESCE(EXCLUDED.ancre_url, leads_statut.ancre_url), updated_at = now()",
-            (host, pattern, statut, note, ancre_url))
+            "ancre_url = COALESCE(EXCLUDED.ancre_url, leads_statut.ancre_url), "
+            "par_qui = COALESCE(EXCLUDED.par_qui, leads_statut.par_qui), updated_at = now()",
+            (host, pattern, statut, note, ancre_url, par))
         conn.commit()
     return True
 
@@ -472,7 +475,8 @@ def _appliquer_quota(rows):
                         "url_representative": None, "score": reste[0]["score"],
                         "raisons": ["quota_host(%d masqués)" % len(reste)], "nb": None,
                         "http_status": None, "tech": [], "in_scope": True,
-                        "premiere_vue": None, "statut": "-", "note": None, "type": "repli"})
+                        "premiere_vue": None, "statut": "-", "note": None, "par_qui": None,
+                        "type": "repli"})
     out.sort(key=lambda x: (x["score"], x["nb"] or 0), reverse=True)
     return out
 
@@ -485,7 +489,7 @@ def lire(seuil=1, quota=True):
     with psycopg.connect(DATABASE_URL) as conn, conn.cursor() as cur:
         cur.execute("SELECT l.host, l.pattern, l.url_representative, l.score, l.raisons, "
                     "l.nb, l.http_status, l.tech, l.in_scope, l.premiere_vue, "
-                    "COALESCE(s.statut, %s) AS statut, s.note "
+                    "COALESCE(s.statut, %s) AS statut, s.note, s.par_qui "
                     "FROM leads l LEFT JOIN leads_statut s "
                     "  ON s.host = l.host AND s.pattern = l.pattern "
                     "WHERE l.score >= %s ORDER BY l.score DESC, l.nb DESC",

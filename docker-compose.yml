@@ -61,8 +61,10 @@ services:
       # À défaut de rôle dédié, retombe sur le compte applicatif.
       DATABASE_URL: postgresql://${BOARD_DB_USER:-${POSTGRES_USER}}:${BOARD_DB_PASS:-${POSTGRES_PASSWORD}}@postgres:5432/${POSTGRES_DB}
       BOARD_PORT: "8080"
-      BOARD_EXPOSE: "${BOARD_EXPOSE:-0}"     # 0=localhost/tunnel ; 1=0.0.0.0 + basic-auth OBLIGATOIRE
-      BOARD_USER: "${BOARD_USER:-}"
+      BOARD_EXPOSE: "${BOARD_EXPOSE:-0}"     # 0=localhost/tunnel ; 1=0.0.0.0 (login déjà obligatoire)
+      # Login OBLIGATOIRE (board partagé, ≥2 comptes). Vide -> le board refuse de démarrer.
+      BOARD_ACCOUNTS: "${BOARD_ACCOUNTS:-}"  # 'alice:passA,bob:passB'
+      BOARD_USER: "${BOARD_USER:-}"          # (legacy, compte unique optionnel)
       BOARD_PASS: "${BOARD_PASS:-}"
     ports:
       # 127.0.0.1 par défaut. Pour exposer : BOARD_BIND_HOST=0.0.0.0 + BOARD_EXPOSE=1 + creds.

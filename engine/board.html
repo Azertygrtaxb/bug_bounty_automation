@@ -43,6 +43,7 @@
   .st-btns b.sel[data-s=en_cours]{color:var(--encours);border-color:var(--encours)}
   .st-btns b.sel[data-s=tue]{color:var(--tue);border-color:var(--tue)}
   .st-btns b.sel[data-s=rapporte]{color:var(--rapporte);border-color:var(--rapporte)}
+  .by{color:var(--mut);font-size:10px;margin:1px 0}
   .note{width:100%;background:var(--bg);border:1px solid var(--border);color:var(--mut);border-radius:4px;padding:2px 5px;font-size:11px}
   tr.tue td{opacity:.5}
   tr.repli td{background:#141a24;color:var(--mut);cursor:pointer;font-style:italic}
@@ -150,18 +151,22 @@ async function charger(){
   }
 }
 function btns(r){
-  return `<div class="st-btns">`+STATUTS.map(s=>`<b data-s="${s}" class="${r.statut===s?'sel':''}">${s}</b>`).join("")+`</div>`;
+  return `<div class="st-btns">`+STATUTS.map(s=>`<b data-s="${s}" class="${r.statut===s?'sel':''}">${s}</b>`).join("")+`</div>`+
+    `<div class="by">${r.par_qui?('par '+esc(r.par_qui)):''}</div>`;
 }
 function wireBtns(tr,r){
   const note=tr.querySelector(".note");
   tr.querySelectorAll(".st-btns b").forEach(b=>b.onclick=async()=>{
     const s=b.dataset.s;
-    const res=await fetch("/api/leads/statut",{method:"POST",headers:{"Content-Type":"application/json"},
+    const res=await fetch("/api/leads/statut",{method:"POST",
+      headers:{"Content-Type":"application/json","X-Board":"1"},   // X-Board = jeton anti-CSRF
       body:JSON.stringify({host:r.host,pattern:r.pattern,statut:s,note:note.value||null})});
-    if(!res.ok){alert("statut refusé: "+(await res.json()).erreur);return;}
-    r.statut=s;
+    if(!res.ok){alert("statut refusé: "+((await res.json()).erreur||res.status));return;}
+    const j=await res.json();
+    r.statut=s; r.par_qui=j.par;
     tr.querySelectorAll(".st-btns b").forEach(x=>x.classList.toggle("sel",x.dataset.s===s));
     tr.classList.toggle("tue",s==="tue");
+    const by=tr.querySelector(".by"); if(by) by.textContent=j.par?("par "+j.par):"";
   });
 }
 async function deplier(host,trRepli){

@@ -46,21 +46,28 @@ recon, ne touche jamais `targets` (sauf lecture). Serveur stdlib (`engine/board.
 une page (`engine/board.html`), zéro build front.
 
 ```bash
-# migrations à jour (006→010) puis :
+# migrations à jour (006→011) + BOARD_ACCOUNTS renseigné dans .env, puis :
 docker compose up -d board
 # board publié sur 127.0.0.1:8080 UNIQUEMENT. Depuis ta machine :
-ssh -L 8080:localhost:8080 root@<vps>   # puis http://localhost:8080
+ssh -L 8080:localhost:8080 root@<vps>   # puis http://localhost:8080 (login demandé)
 ```
 
-Accès machine (le collègue) : `GET /api/leads?min_score=6&quota=0` renvoie du JSON pur.
+Accès machine (le collègue) : `GET /api/leads?min_score=6&quota=0` (avec auth) renvoie du JSON pur.
 
-### Exposition
-- `BOARD_EXPOSE=0` (défaut) : localhost/tunnel, basic-auth optionnelle. Le **panneau de
-  détail** (`/api/lead/detail`, données capturées sensibles) exige TOUJOURS une auth :
-  renseigne `BOARD_USER`/`BOARD_PASS` pour l'activer.
-- `BOARD_EXPOSE=1` : bind 0.0.0.0 + basic-auth OBLIGATOIRE partout ; refuse de démarrer si
-  `BOARD_PASS` est vide. Pense aussi à `BOARD_BIND_HOST=0.0.0.0`. À éviter en HTTP clair
-  sur IP publique (identifiants ET cibles exposés) — préfère le tunnel SSH.
+### Login (obligatoire, board partagé à deux)
+Le board porte la carte d'attaque d'un périmètre bancaire : **login obligatoire partout**,
+il refuse de démarrer sans compte. Un compte par chasseur :
+
+```bash
+BOARD_ACCOUNTS='alice:motdepasseA,bob:motdepasseB'   # dans .env, jamais committé
+```
+
+- Comparaison **timing-safe** (anti-énumération) ; POST protégé **CSRF** (en-tête custom
+  `X-Board` + `Origin` même hôte). Chaque statut trace **qui** l'a posé (`par_qui`, visible
+  dans l'UI et l'API).
+- `BOARD_EXPOSE=0` (défaut) : bind publié sur 127.0.0.1 (tunnel SSH). `BOARD_EXPOSE=1` +
+  `BOARD_BIND_HOST=0.0.0.0` pour exposer — préfère le tunnel (HTTP clair = identifiants ET
+  cibles à nu). Le login reste obligatoire dans les deux cas.
 
 ### Rôle postgres SELECT-only du board (recommandé)
 Le process board n'a besoin que de lire `targets`/`leads` et d'écrire `leads_statut`

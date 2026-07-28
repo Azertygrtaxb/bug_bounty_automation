@@ -15,11 +15,14 @@ UPDATE sur leads_statut seulement — voir README « rôle board_ro »).
     GET  /api/orphelins       statuts orphelins (travail humain à re-router)
     GET  /api/stats           compteurs (total, par statut, par host top10, nouveaux 24h/7j)
 
-Exposition : par défaut BOARD_EXPOSE=0 -> accès localhost/tunnel SSH, auth optionnelle
-(sauf /api/lead/detail, toujours protégé). BOARD_EXPOSE=1 -> auth OBLIGATOIRE partout,
-refuse de démarrer si BOARD_PASS vide.
+Sécurité : login OBLIGATOIRE partout (board PARTAGÉ, ≥2 comptes via BOARD_ACCOUNTS
+'alice:passA,bob:passB') — refuse de démarrer sans compte. Comparaison timing-safe.
+POST protégé CSRF (en-tête custom X-Board + Origin même hôte). Chaque statut trace QUI
+l'a posé (par_qui). BOARD_EXPOSE=0 (défaut) publie sur 127.0.0.1 (tunnel SSH) ; =1 bind
+0.0.0.0 (login déjà obligatoire de toute façon).
 """
 import base64
+import hmac
 import json
 import os
 import sys
@@ -36,9 +39,27 @@ HTML = Path(__file__).resolve().parent / "board.html"
 PORT = int(os.environ.get("BOARD_PORT", "8080"))
 BIND = os.environ.get("BOARD_BIND", "0.0.0.0")  # publish côté host contrôle l'exposition réelle
 EXPOSE = os.environ.get("BOARD_EXPOSE", "0").lower() in ("1", "true", "yes", "on")
-USER = os.environ.get("BOARD_USER", "")
-PASS = os.environ.get("BOARD_PASS", "")
-AUTH_CONFIGUREE = bool(USER and PASS)
+
+
+def _parse_comptes(raw, legacy_user, legacy_pass):
+    """BOARD_ACCOUNTS='alice:passA,bob:passB' -> {user: pass}. Fusionne l'éventuel couple
+    legacy BOARD_USER/BOARD_PASS. Board PARTAGÉ : login OBLIGATOIRE, au moins un compte."""
+    comptes = {}
+    for pair in (raw or "").split(","):
+        pair = pair.strip()
+        if not pair or ":" not in pair:
+            continue
+        u, _, p = pair.partition(":")
+        u, p = u.strip(), p.strip()
+        if u and p:
+            comptes[u] = p
+    if legacy_user and legacy_pass:
+        comptes.setdefault(legacy_user.strip(), legacy_pass)
+    return comptes
+
+
+COMPTES = _parse_comptes(os.environ.get("BOARD_ACCOUNTS", ""),
+                         os.environ.get("BOARD_USER", ""), os.environ.get("BOARD_PASS", ""))
 
 
 def _now():
@@ -63,8 +84,9 @@ def _parse_depuis(v):
 
 def _filtrer(rows, host=None, statut=None, in_scope=None, q=None, depuis=None):
     out = []
+    hostl = host.lower() if host else None
     for r in rows:
-        if host and r.get("host") != host:
+        if hostl and hostl not in (r.get("host") or "").lower():   # substring, insensible à la casse
             continue
         if statut and r.get("statut") != statut:
             continue
@@ -104,36 +126,47 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
-    def _auth_ok(self):
+    def _auth_user(self):
+        """Renvoie le compte authentifié, ou None. Comparaison TIMING-SAFE ; un pass
+        bidon est quand même comparé pour lisser le timing (anti-énumération)."""
         h = self.headers.get("Authorization", "")
-        if not h.startswith("Basic ") or not AUTH_CONFIGUREE:
-            return False
+        if not h.startswith("Basic "):
+            return None
         try:
             u, _, p = base64.b64decode(h[6:]).decode("utf-8").partition(":")
         except Exception:
-            return False
-        return u == USER and p == PASS
+            return None
+        attendu = COMPTES.get(u)
+        if attendu is None:
+            hmac.compare_digest(p or " ", " ")   # lisse le timing pour un user inconnu
+            return None
+        return u if hmac.compare_digest(p, attendu) else None
 
     def _exiger_auth(self):
         self.send_response(401)
-        self.send_header("WWW-Authenticate", 'Basic realm="board"')
+        self.send_header("WWW-Authenticate", 'Basic realm="Lead Board"')
         self.end_headers()
 
-    def _garde(self, sensible=False):
-        """True si la requête peut continuer. `sensible` (détail) -> auth TOUJOURS exigée.
-        Sinon auth exigée seulement en mode exposé."""
-        if sensible:
-            if not AUTH_CONFIGUREE:
-                self._envoyer(503, {"erreur": "auth requise pour le détail : configurer "
-                                    "BOARD_USER/BOARD_PASS"})
-                return False
-            if not self._auth_ok():
-                self._exiger_auth()
-                return False
-            return True
-        if EXPOSE and not self._auth_ok():
+    def _garde(self):
+        """Login OBLIGATOIRE partout (board partagé). Renvoie le compte, ou None après
+        avoir déjà renvoyé 401."""
+        u = self._auth_user()
+        if not u:
             self._exiger_auth()
+            return None
+        return u
+
+    def _csrf_ok(self):
+        """Anti-CSRF : exige l'en-tête custom X-Board (impossible à poser depuis un
+        <form> cross-site sans préflight, non accordé) + Origin/Referer même hôte si
+        présent. Le fetch de la page le pose ; un site tiers ne peut pas."""
+        if self.headers.get("X-Board", "") != "1":
             return False
+        src = self.headers.get("Origin") or self.headers.get("Referer") or ""
+        if src:
+            net = urlsplit(src).netloc
+            if net and self.headers.get("Host") and net != self.headers.get("Host"):
+                return False
         return True
 
     def log_message(self, *a):  # silencieux (pas de log verbeux par requête)
@@ -179,7 +212,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._envoyer(200, {"host": host, "count": len(masques), "masques": masques})
 
         if u.path == "/api/lead/detail":
-            if not self._garde(sensible=True):   # R2 : toujours derrière auth
+            if not self._garde():   # R2 : données sensibles -> auth (obligatoire partout)
                 return
             host, pattern = one("host"), one("pattern")
             if not host or not pattern:
@@ -223,8 +256,11 @@ class Handler(BaseHTTPRequestHandler):
         u = urlsplit(self.path)
         if u.path != "/api/leads/statut":
             return self._envoyer(404, {"erreur": "route inconnue"})
-        if not self._garde():
+        user = self._garde()
+        if not user:
             return
+        if not self._csrf_ok():
+            return self._envoyer(403, {"erreur": "requête inter-site refusée (CSRF)"})
         try:
             n = int(self.headers.get("Content-Length", "0"))
             body = json.loads(self.rfile.read(n) or b"{}")
@@ -234,20 +270,22 @@ class Handler(BaseHTTPRequestHandler):
         if not host or not pattern or not statut:
             return self._envoyer(400, {"erreur": "host, pattern et statut obligatoires"})
         try:
-            leads.marquer(host, pattern, statut, body.get("note"))
+            leads.marquer(host, pattern, statut, body.get("note"), par=user)  # trace QUI
         except ValueError as e:
             return self._envoyer(400, {"erreur": str(e)})
-        return self._envoyer(200, {"ok": True, "host": host, "pattern": pattern, "statut": statut})
+        return self._envoyer(200, {"ok": True, "host": host, "pattern": pattern,
+                                   "statut": statut, "par": user})
 
 
 def main():
-    if EXPOSE and not PASS:
-        sys.stderr.write("[board] REFUS de démarrer : BOARD_EXPOSE=1 sans BOARD_PASS "
-                         "(auth obligatoire en mode exposé).\n")
+    if not COMPTES:
+        sys.stderr.write("[board] REFUS de démarrer : aucun compte. Login OBLIGATOIRE "
+                         "(board partagé) -> BOARD_ACCOUNTS='alice:passA,bob:passB' "
+                         "(ou BOARD_USER/BOARD_PASS).\n")
         return 2
-    mode = "EXPOSÉ (auth obligatoire)" if EXPOSE else "localhost/tunnel (auth %s)" % (
-        "activée" if AUTH_CONFIGUREE else "optionnelle ; détail protégé")
-    sys.stderr.write("[board] http://%s:%d  — %s\n" % (BIND, PORT, mode))
+    mode = "EXPOSÉ (0.0.0.0)" if EXPOSE else "localhost/tunnel"
+    sys.stderr.write("[board] http://%s:%d — %s — login obligatoire, %d compte(s)\n"
+                     % (BIND, PORT, mode, len(COMPTES)))
     ThreadingHTTPServer((BIND, PORT), Handler).serve_forever()
     return 0
 
