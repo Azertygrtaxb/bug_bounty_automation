@@ -68,12 +68,22 @@
   #drawer table{margin:6px 0}
   .k{color:var(--mut)}
   .empty{padding:30px;text-align:center;color:var(--mut)}
+  /* --- OPS : lancement recon/chasse depuis la ligne de host --- */
+  .ops{display:flex;gap:4px;align-items:center}
+  .ops b{padding:2px 7px;border:1px solid var(--border);border-radius:5px;cursor:pointer;
+         font-weight:600;color:var(--mut);font-size:11px;white-space:nowrap}
+  .ops b:hover{border-color:var(--acc);color:var(--acc)}
+  .ops b.busy{color:var(--encours);border-color:var(--encours);cursor:default}
+  .ops b.done{color:var(--rapporte);border-color:var(--rapporte)}
+  .ops b.off{opacity:.35;cursor:not-allowed}
+  a.ops-lien{color:var(--acc)}
 </style>
 </head>
 <body>
 <header>
   <h1>🎯 Lead Board</h1>
   <button id="btn-vue">vue</button>
+  <a class="ops-lien" href="/ops">⚙ ops &amp; statut</a>
   <span class="stats" id="stats">…</span>
 </header>
 <div class="filters">
@@ -97,7 +107,7 @@
 <table id="tbl">
   <thead><tr>
     <th>score</th><th>nb</th><th>statut</th><th>host</th><th>pattern / déplier</th>
-    <th>http</th><th>tech</th><th>raisons</th>
+    <th>http</th><th>tech</th><th>raisons</th><th>lancer</th>
   </tr></thead>
   <tbody id="rows"></tbody>
 </table>
@@ -154,7 +164,8 @@ function ligneLeadHTML(r){
     <td><span class="pat">${esc(r.pattern)}</span>${nouveau?' <span class="badge new">NOUVEAU</span>':''}${url?"<br>"+lien(url):""}</td>
     <td class="k">${esc(r.http_status)}</td>
     <td class="tech">${esc((r.tech||[]).join(", "))}</td>
-    <td class="reasons">${esc((r.raisons||[]).join(", "))}</td>`;
+    <td class="reasons">${esc((r.raisons||[]).join(", "))}</td>
+    <td></td>`;
 }
 function wireLead(tr,r,gid){
   const note=tr.querySelector(".note");
@@ -202,10 +213,84 @@ async function chargerGroupe(){
       <td class="past">${pastilles(h.statuts)}</td>
       <td>${esc(h.host)} ${badgeNouveau(h.nb_nouveaux)}</td>
       <td class="hint">▸ déplier</td><td></td>
-      <td class="tech">${esc((h.tech||[]).join(", "))}</td><td></td>`;
+      <td class="tech">${esc((h.tech||[]).join(", "))}</td><td></td>
+      <td class="ops" data-ops="${esc(h.host)}"><span class="k">…</span></td>`;
     tr.onclick=()=>toggleGroupe(tr,h,gid);
     tb.appendChild(tr);
   }
+  chargerOps(d.hosts.map(x=>x.host));
+}
+
+// ---------- OPS : lancer une recon / une chasse depuis la ligne du host ----------
+// Le board ne lance rien lui-même : il pose une demande dans bb_jobs, le runner du VPS
+// concerné la prend (voir engine/ops.py). Le bouton reflète donc l'état RÉEL du travail,
+// pas le fait d'avoir cliqué.
+async function chargerOps(hosts){
+  if(!hosts.length) return;
+  // On ne redessine QUE les cellules demandées : un rafraîchissement ciblé après un
+  // clic ne doit pas effacer l'état des autres lignes avec un jeu de données partiel.
+  const vises=new Set(hosts);
+  let d;
+  try{
+    const r=await fetch("/api/ops/hosts?hosts="+encodeURIComponent(hosts.join(",")));
+    if(!r.ok){
+      // Migration 012 pas jouée, ou pipeline absent : on le dit une fois, sans casser
+      // le board — les leads restent lisibles et modifiables.
+      document.querySelectorAll("td.ops[data-ops]").forEach(td=>{
+        if(vises.has(td.dataset.ops)) td.innerHTML='<span class="k" title="ops indisponible">—</span>'; });
+      return;
+    }
+    d=(await r.json()).hosts||{};
+  }catch(e){ return; }
+  document.querySelectorAll("td.ops[data-ops]").forEach(td=>{
+    const host=td.dataset.ops;
+    if(!vises.has(host)) return;
+    const e=d[host]||{};
+    td.innerHTML="";
+    td.appendChild(boutonOps(host,"recon",e));
+    td.appendChild(boutonOps(host,"hunt",e));
+    td.onclick=ev=>ev.stopPropagation();   // ne pas déplier le groupe en cliquant ici
+  });
+}
+function boutonOps(host,phase,e){
+  const b=document.createElement("b");
+  const job=e["job_"+phase];
+  const fait = phase==="recon" ? e.recon_le : e.hunt_le;
+  b.textContent = phase==="recon" ? "recon" : "chasse";
+  if(job){
+    b.className="busy";
+    b.textContent += job.etat==="en_cours" ? " ⟳" : " …";
+    b.title = "job #"+job.id+" "+job.etat+" — suivi sur la page ops";
+    b.onclick=()=>location.href="/ops";
+    return b;
+  }
+  if(phase==="hunt" && !e.recon_disponible){
+    // hunt.sh refuse sans marqueur DONE : mieux vaut le dire ici que laisser
+    // l'utilisateur cliquer et voir un job échouer dix secondes plus tard.
+    b.className="off"; b.title="aucune recon complète disponible sur le VPS de chasse";
+    b.onclick=()=>alert("Pas de recon complète pour "+host+" sur le VPS de chasse.\nLancer d'abord une recon, elle sera poussée automatiquement.");
+    return b;
+  }
+  if(fait){ b.className="done"; b.title=(phase==="recon"?"recon":"chasse")+" le "+new Date(fait).toLocaleString("fr-FR")+" — cliquer pour relancer"; }
+  b.onclick=async()=>{
+    const opts = phase==="recon"
+      ? {profile:"deep", rate:12, force:!!fait}
+      : {model:"opus", effort:"high", timeout_h:4};
+    const quoi = phase==="recon" ? "une recon deep (rate 12)" : "une session Claude (opus, 4 h max)";
+    if(!confirm("Lancer "+quoi+" sur "+host+" ?"))return;
+    b.className="busy"; b.textContent="…";
+    try{
+      const r=await fetch("/api/ops/lancer",{method:"POST",
+        headers:{"Content-Type":"application/json","X-Board":"1"},
+        body:JSON.stringify({host:host,phase:phase,options:opts})});
+      const j=await r.json();
+      if(!r.ok) throw new Error(j.erreur||("HTTP "+r.status));
+      b.textContent=(phase==="recon"?"recon":"chasse")+" …";
+      b.title="job #"+j.id+" en file"+(j.avertissement?" — "+j.avertissement:"");
+      if(j.avertissement) alert(j.avertissement);
+    }catch(err){ alert("refusé : "+err.message); chargerOps([host]); }
+  };
+  return b;
 }
 async function toggleGroupe(trHost,h,gid){
   if(trHost.dataset.open==="1"){
@@ -226,7 +311,7 @@ async function toggleGroupe(trHost,h,gid){
   });
   if(lst.length>MAXG){
     const b=document.createElement("tr"); b.className="sub more"; b.dataset.g=gid;
-    b.innerHTML=`<td></td><td></td><td colspan="6">… voir les ${lst.length-MAXG} restants (${MAXG} affichés)</td>`;
+    b.innerHTML=`<td></td><td></td><td colspan="7">… voir les ${lst.length-MAXG} restants (${MAXG} affichés)</td>`;
     b.onclick=(e)=>{e.stopPropagation();
       document.querySelectorAll(`tr.sub.cache[data-g="${gid}"]`).forEach(x=>x.classList.remove("cache")); b.remove();};
     anchor.after(b);
@@ -248,7 +333,7 @@ async function chargerPlat(){
     const tr=document.createElement("tr");
     if(r.type==="repli"){
       tr.className="repli";
-      tr.innerHTML=`<td class="sc">${r.score}</td><td></td><td colspan="6">▸ ${esc(r.pattern)} sur <b>${esc(r.host)}</b> — cliquer pour déplier</td>`;
+      tr.innerHTML=`<td class="sc">${r.score}</td><td></td><td colspan="7">▸ ${esc(r.pattern)} sur <b>${esc(r.host)}</b> — cliquer pour déplier</td>`;
       tr.onclick=()=>deplierPlat(r.host,tr);
       tb.appendChild(tr); continue;
     }

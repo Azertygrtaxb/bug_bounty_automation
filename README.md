@@ -121,6 +121,31 @@ l'hôte), arrête Caddy, puis `ssh -L 8080:localhost:8080 root@<vps>` → http:/
 postgres et redis n'ont **aucun** port publié (réseau Docker interne). Accès DB depuis
 l'hôte : `docker compose exec postgres psql -U <user> -d <db>`.
 
+## Lancements depuis le board (Tier 5 — `ops/`)
+
+Boutons **recon** / **chasse** sur chaque ligne de host, interrupteur on/off par phase,
+bouton **TOUT COUPER**, et une page `/ops` qui montre ce qui tourne en temps réel.
+
+Le board **n'exécute rien** : il n'a ni `docker.sock` ni clé SSH. Il écrit une ligne dans
+`bb_jobs` ; un runner installé sur chaque VPS (`ops/job_runner.sh`, systemd) la prend et
+lance `recon.sh` ou `hunt.sh` sur l'hôte. Les scans tournent donc là où ils doivent
+tourner — la recon sur le VPS de recon, la chasse sur celui de chasse — sans que
+l'interface web n'obtienne le droit d'exécuter quoi que ce soit.
+
+```bash
+# 1) migration (base déjà créée : engine/db/ n'est joué qu'à la création du volume)
+docker exec -i bug_bounty_automation-postgres-1 \
+    psql -U bbhunter -d bugbounty -v ON_ERROR_STOP=1 < engine/db/013_ops_jobs.sql
+docker compose up -d --build board
+
+# 2) un runner par VPS
+sudo ./ops/install_runner.sh recon     # ou: hunt
+/opt/bb-ops/job_runner.sh --phase recon --check
+systemctl enable --now bb-job-runner@recon
+```
+
+Détail complet, garde-fous et diagnostic : **[`ops/README.md`](ops/README.md)**.
+
 ## Juge sémantique (repêchage LLM du résidu)
 
 Un juge LLM **aveugle** relit les corps **déjà stockés** (aucun re-fetch réseau) pour

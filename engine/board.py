@@ -15,6 +15,18 @@ UPDATE sur leads_statut seulement — voir README « rôle board_ro »).
     GET  /api/orphelins       statuts orphelins (travail humain à re-router)
     GET  /api/stats           compteurs (total, par statut, par host top10, nouveaux 24h/7j)
 
+OPS (Tier 5) — lancer/couper recon et chasse depuis l'interface. Le board n'exécute
+RIEN lui-même : il pose une ligne dans `bb_jobs`, un runner sur le VPS concerné la
+prend (voir engine/ops.py et ops/job_runner.sh).
+
+    GET  /ops                 page de statut (ce qui tourne, ce qui attend, historique)
+    GET  /api/ops/etat        interrupteurs + runners + jobs vivants + historique
+    GET  /api/ops/hosts       ?hosts=a,b : état recon/chasse par host (pour les boutons)
+    POST /api/ops/lancer      {host,phase,options} -> met en file
+    POST /api/ops/arreter     {id} -> annule (en attente) ou demande l'arrêt (en cours)
+    POST /api/ops/controle    {cle,actif} -> interrupteur on/off d'une phase
+    POST /api/ops/tout-couper  off partout + arrêt demandé sur tout ce qui vit
+
 Sécurité : login OBLIGATOIRE partout (board PARTAGÉ, ≥2 comptes via BOARD_ACCOUNTS
 'alice:passA,bob:passB') — refuse de démarrer sans compte. Comparaison timing-safe.
 POST protégé CSRF (en-tête custom X-Board + Origin même hôte). Chaque statut trace QUI
@@ -41,7 +53,16 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from engine import leads          # noqa: E402
 from knowledge import config      # noqa: E402
 
+# OPS est optionnel : sur une installation sans pipeline (pas de bb_jobs), le board doit
+# continuer à servir les leads. On dégrade au lieu de refuser de démarrer.
+try:
+    from engine import ops        # noqa: E402
+except Exception as _e:           # pragma: no cover
+    ops = None
+    _OPS_ERREUR = str(_e)
+
 HTML = Path(__file__).resolve().parent / "board.html"
+HTML_OPS = Path(__file__).resolve().parent / "ops.html"
 PORT = int(os.environ.get("BOARD_PORT", "8080"))
 EXPOSE = os.environ.get("BOARD_EXPOSE", "0").lower() in ("1", "true", "yes", "on")
 # EXPOSE=1 -> écoute 0.0.0.0 DANS le conteneur (joignable par Caddy sur le réseau Docker,
@@ -401,7 +422,56 @@ class Handler(BaseHTTPRequestHandler):
                 return
             return self._envoyer(200, self._stats())
 
+        # ------------------------------------------------------------------ OPS ---
+        if u.path == "/ops":
+            if not self._garde():
+                return
+            try:
+                return self._envoyer(200, HTML_OPS.read_bytes(), "text/html")
+            except FileNotFoundError:
+                return self._envoyer(500, {"erreur": "ops.html introuvable"})
+
+        if u.path == "/api/ops/etat":
+            if not self._garde():
+                return
+            if not self._ops_dispo():
+                return
+            try:
+                return self._envoyer(200, ops.etat(int(one("limite", "60") or 60)))
+            except Exception as e:
+                return self._envoyer(503, {"erreur": self._msg_base(e)})
+
+        if u.path == "/api/ops/hosts":
+            if not self._garde():
+                return
+            if not self._ops_dispo():
+                return
+            hosts = [h for h in (one("hosts", "") or "").split(",") if h.strip()]
+            if len(hosts) > 300:      # garde-fou : la page n'affiche jamais autant de lignes
+                hosts = hosts[:300]
+            try:
+                return self._envoyer(200, {"hosts": ops.etat_hosts(hosts)})
+            except Exception as e:
+                return self._envoyer(503, {"erreur": self._msg_base(e)})
+
         return self._envoyer(404, {"erreur": "route inconnue"})
+
+    # --- OPS : disponibilité du module (migration 012 jouée ?) ---
+    def _ops_dispo(self):
+        if ops is None:
+            self._envoyer(503, {"erreur": "module ops indisponible : %s" % _OPS_ERREUR})
+            return False
+        return True
+
+    @staticmethod
+    def _msg_base(e):
+        """Message court et parlant plutôt qu'une trace psycopg : la cause la plus
+        fréquente est la migration 012 non jouée sur une base déjà créée."""
+        m = str(e).strip().splitlines()[0] if str(e).strip() else e.__class__.__name__
+        if "bb_jobs" in m or "bb_controle" in m or "bb_runners" in m:
+            return ("%s — migration 013_ops_jobs.sql probablement pas jouée "
+                    "(voir ops/README.md)" % m)
+        return m
 
     def do_HEAD(self):
         """P1 — liveness pour la supervision (curl -I). 200 + en-têtes, AUCUN corps, aucune
@@ -434,10 +504,12 @@ class Handler(BaseHTTPRequestHandler):
                 "nouveaux_24h": n24, "nouveaux_7j": n7,
                 "max_leads_par_groupe": config.AFFICHAGE_MAX_LEADS_PAR_GROUPE}
 
-    # --- écriture (leads_statut uniquement) ---
+    # --- écriture (leads_statut + file de travaux) ---
     def do_POST(self):
         u = urlsplit(self.path)
-        if u.path != "/api/leads/statut":
+        ROUTES_OPS = ("/api/ops/lancer", "/api/ops/arreter", "/api/ops/controle",
+                      "/api/ops/tout-couper")
+        if u.path != "/api/leads/statut" and u.path not in ROUTES_OPS:
             return self._envoyer(404, {"erreur": "route inconnue"})
         user = self._garde()
         if not user:
@@ -449,6 +521,10 @@ class Handler(BaseHTTPRequestHandler):
             body = json.loads(self.rfile.read(n) or b"{}")
         except (ValueError, json.JSONDecodeError):
             return self._envoyer(400, {"erreur": "JSON invalide"})
+
+        if u.path in ROUTES_OPS:
+            return self._post_ops(u.path, body, user)
+
         host, pattern, statut = body.get("host"), body.get("pattern"), body.get("statut")
         if not host or not pattern or not statut:
             return self._envoyer(400, {"erreur": "host, pattern et statut obligatoires"})
@@ -460,6 +536,49 @@ class Handler(BaseHTTPRequestHandler):
                  % (user, self._ip_client(), host, pattern, statut))
         return self._envoyer(200, {"ok": True, "host": host, "pattern": pattern,
                                    "statut": statut, "par": user})
+
+    # --- OPS : lancer / arrêter / interrupteur -------------------------------------
+    # Chaque action est journalisée avec QUI et depuis QUELLE IP. Ces boutons envoient
+    # du trafic vers des cibles réelles au nom du programme : sans trace nominative, une
+    # plainte de la cible serait impossible à rattacher à une décision humaine.
+    def _post_ops(self, route, body, user):
+        if not self._ops_dispo():
+            return
+        ip = self._ip_client()
+        try:
+            if route == "/api/ops/lancer":
+                r = ops.lancer(body.get("host"), body.get("phase"), user,
+                               body.get("options") or {})
+                _journal("LANCE par=%s ip=%s job=#%s %s %s %s"
+                         % (user, ip, r["id"], r["phase"], r["host"], r["options"]))
+                return self._envoyer(200, dict(r, ok=True))
+
+            if route == "/api/ops/arreter":
+                try:
+                    jid = int(body.get("id"))
+                except (TypeError, ValueError):
+                    return self._envoyer(400, {"erreur": "id manquant ou invalide"})
+                r = ops.arreter(jid, user)
+                _journal("ARRET par=%s ip=%s job=#%s -> %s" % (user, ip, jid, r["etat"]))
+                return self._envoyer(200, dict(r, ok=True))
+
+            if route == "/api/ops/controle":
+                r = ops.controle(body.get("cle"), bool(body.get("actif")), user)
+                _journal("INTERRUPTEUR par=%s ip=%s %s=%s"
+                         % (user, ip, r["cle"], "ON" if r["actif"] else "OFF"))
+                return self._envoyer(200, dict(r, ok=True))
+
+            if route == "/api/ops/tout-couper":
+                r = ops.tout_couper(user)
+                _journal("TOUT_COUPER par=%s ip=%s annules=%s arrets=%s"
+                         % (user, ip, r["annules"], r["arrets_demandes"]))
+                return self._envoyer(200, dict(r, ok=True))
+        except ValueError as e:
+            return self._envoyer(400, {"erreur": str(e)})
+        except Exception as e:
+            _journal("OPS_ERREUR par=%s route=%s : %s" % (user, route, e))
+            return self._envoyer(503, {"erreur": self._msg_base(e)})
+        return self._envoyer(404, {"erreur": "route inconnue"})
 
 
 def _outil_hash():

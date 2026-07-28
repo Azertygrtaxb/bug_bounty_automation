@@ -1,0 +1,33 @@
+[Unit]
+# Instance = la phase traitée :  bb-job-runner@recon  |  bb-job-runner@hunt
+# Le VPS de reconnaissance ne lance que @recon, celui de chasse que @hunt.
+Description=bb-ops — exécute les travaux %i demandés depuis le board
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+# Réglages par instance : /etc/default/bb-job-runner-recon (ou -hunt).
+# BB_MAX_JOBS, BB_PIPELINE_DIR, BB_RUN_AS, BB_DB_HOST, BB_POLL…
+EnvironmentFile=-/etc/default/bb-job-runner
+EnvironmentFile=-/etc/default/bb-job-runner-%i
+Environment=BB_MAX_JOBS=2
+Environment=BB_POLL=8
+Environment=BB_PIPELINE_DIR=/opt/bb-pipeline
+Environment=BB_RUN_AS=bb
+ExecStart=/opt/bb-ops/job_runner.sh --phase %i --max-jobs ${BB_MAX_JOBS} --poll ${BB_POLL}
+Restart=always
+RestartSec=15
+
+# Un redémarrage du runner ne doit PAS tuer les scans en cours : ils tournent dans
+# leur propre session (setsid) et le runner les reprend au démarrage suivant grâce au
+# fichier de pgid. Sans KillMode=process, systemd tuerait tout le cgroup — une chasse
+# de trois heures perdue parce qu'on a redémarré un démon de supervision.
+KillMode=process
+
+StandardOutput=append:/var/log/bb-ops/runner-%i.log
+StandardError=append:/var/log/bb-ops/runner-%i.log
+
+[Install]
+WantedBy=multi-user.target

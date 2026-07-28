@@ -1,0 +1,258 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>⚙ Ops — lancements</title>
+<style>
+  :root{
+    --bg:#0d1117; --panel:#161b22; --panel2:#1c2230; --border:#2a3240; --fg:#e6edf3;
+    --mut:#8b98a5; --acc:#e3b341; --link:#58a6ff;
+    --ok:#3fb950; --ko:#f85149; --wait:#8b98a5; --run:#58a6ff; --stop:#a371f7;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--fg);font:13px/1.45 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+  header{padding:10px 14px;border-bottom:1px solid var(--border);display:flex;gap:14px;align-items:center;flex-wrap:wrap;position:sticky;top:0;background:var(--bg);z-index:5}
+  h1{font-size:15px;margin:0;color:var(--acc)}
+  h2{font-size:12px;margin:16px 14px 6px;color:var(--mut);text-transform:uppercase;letter-spacing:.05em}
+  a{color:var(--link);text-decoration:none}
+  a:hover{text-decoration:underline}
+  button,input,select{font:inherit}
+  button{cursor:pointer;background:var(--panel2);border:1px solid var(--border);color:var(--fg);border-radius:6px;padding:5px 11px}
+  button:hover{border-color:var(--acc)}
+  button:disabled{opacity:.4;cursor:not-allowed}
+  input,select{background:var(--panel2);color:var(--fg);border:1px solid var(--border);border-radius:5px;padding:4px 7px}
+  input[type=number]{width:66px}
+  .sw{border-radius:6px;padding:5px 11px;border:1px solid;font-weight:700}
+  .sw.on{color:var(--ok);border-color:var(--ok)}
+  .sw.off{color:var(--ko);border-color:var(--ko)}
+  #couper{border-color:var(--ko);color:var(--ko);font-weight:700}
+  #couper:hover{background:#2d1418}
+  .bar{display:flex;gap:8px;flex-wrap:wrap;align-items:center;padding:9px 14px;border-bottom:1px solid var(--border);background:var(--panel)}
+  .bar label{color:var(--mut)}
+  table{width:100%;border-collapse:collapse}
+  th,td{text-align:left;padding:5px 8px;border-bottom:1px solid var(--border);vertical-align:top}
+  th{color:var(--mut);font-weight:600;font-size:11px;text-transform:uppercase;letter-spacing:.04em;background:var(--panel)}
+  tr:hover td{background:#12171f}
+  td.n{text-align:right;color:var(--mut)}
+  .et{display:inline-block;padding:0 7px;border-radius:9px;font-size:10px;font-weight:700;border:1px solid}
+  .et.en_attente{color:var(--wait);border-color:var(--wait)}
+  .et.en_cours{color:var(--run);border-color:var(--run)}
+  .et.termine{color:var(--ok);border-color:var(--ok)}
+  .et.echec{color:var(--ko);border-color:var(--ko)}
+  .et.annule{color:var(--stop);border-color:var(--stop)}
+  .k{color:var(--mut);font-size:11px}
+  .warn{color:var(--acc)}
+  .bad{color:var(--ko)}
+  .good{color:var(--ok)}
+  #msg{padding:8px 14px;font-size:12px;display:none;border-bottom:1px solid var(--border)}
+  #msg.ok{display:block;background:#0f2417;color:#7ee2a8}
+  #msg.err{display:block;background:#2d1418;color:#ffb4ab}
+  .empty{padding:18px 14px;color:var(--mut)}
+  .opts{color:var(--mut);font-size:11px}
+</style>
+</head>
+<body>
+<header>
+  <h1>⚙ Ops — lancements</h1>
+  <a href="/">← lead board</a>
+  <span class="k" id="tick">…</span>
+</header>
+
+<div class="bar">
+  <span class="k">interrupteurs :</span>
+  <button class="sw" id="sw-recon">recon …</button>
+  <button class="sw" id="sw-hunt">chasse …</button>
+  <button id="couper">⏻ TOUT COUPER</button>
+  <span class="k" id="ctrl-info"></span>
+</div>
+
+<div class="bar">
+  <span class="k">lancer :</span>
+  <input type="text" id="host" placeholder="host (ex: www.bci.nc)" size="34" list="prets">
+  <datalist id="prets"></datalist>
+  <select id="phase">
+    <option value="recon">recon</option>
+    <option value="hunt">chasse (Claude)</option>
+  </select>
+  <span id="opt-recon">
+    <label>profil</label>
+    <select id="profile"><option>sweep</option><option selected>deep</option><option>long</option></select>
+    <label>rate</label><input type="number" id="rate" value="12" min="1" max="30">
+    <label title="relance même si la recon existe déjà"><input type="checkbox" id="force"> force</label>
+  </span>
+  <span id="opt-hunt" style="display:none">
+    <label>modèle</label>
+    <select id="model"><option selected>opus</option><option>sonnet</option><option>fable</option></select>
+    <label>effort</label>
+    <select id="effort"><option>medium</option><option selected>high</option><option>xhigh</option><option>max</option></select>
+    <label>plafond h</label><input type="number" id="timeout_h" value="4" min="1" max="8">
+  </span>
+  <button id="go">▶ mettre en file</button>
+</div>
+
+<div id="msg"></div>
+
+<h2>runners</h2>
+<table><thead><tr><th>runner</th><th>phase</th><th>dernier signe</th><th>jobs</th><th>ip de sortie</th><th>recons prêtes</th></tr></thead>
+<tbody id="runners"></tbody></table>
+<div class="empty" id="no-runners" style="display:none">aucun runner enregistré — rien ne sera exécuté (voir <code>ops/README.md</code>)</div>
+
+<h2>en cours &amp; en attente</h2>
+<table><thead><tr><th>#</th><th>phase</th><th>host</th><th>état</th><th>depuis</th><th>options</th><th>demandé par</th><th>runner</th><th></th></tr></thead>
+<tbody id="vivants"></tbody></table>
+<div class="empty" id="no-vivants" style="display:none">rien en file, rien en cours</div>
+
+<h2>historique récent</h2>
+<table><thead><tr><th>#</th><th>phase</th><th>host</th><th>état</th><th>durée</th><th>rc</th><th>fini</th><th>par</th><th>message</th></tr></thead>
+<tbody id="histo"></tbody></table>
+
+<script>
+const $=id=>document.getElementById(id);
+const esc=s=>(s==null?"":String(s)).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+let ETAT=null, enVol=false;
+
+function duree(s){
+  if(s==null) return "—";
+  s=Math.max(0,s|0);
+  if(s<60) return s+"s";
+  if(s<3600) return Math.floor(s/60)+"m"+String(s%60).padStart(2,"0");
+  return Math.floor(s/3600)+"h"+String(Math.floor((s%3600)/60)).padStart(2,"0");
+}
+function heure(iso){ if(!iso) return "—"; const d=new Date(iso);
+  return d.toLocaleString("fr-FR",{day:"2-digit",month:"2-digit",hour:"2-digit",minute:"2-digit"}); }
+function optsTxt(o){ if(!o) return ""; return Object.entries(o).map(([k,v])=>k+"="+v).join(" "); }
+function dire(txt,ok){ const m=$("msg"); m.className=ok?"ok":"err"; m.textContent=txt;
+  clearTimeout(window._m); window._m=setTimeout(()=>{m.className="";},8000); }
+
+async function poster(route,corps){
+  const r=await fetch(route,{method:"POST",
+    headers:{"Content-Type":"application/json","X-Board":"1"},
+    body:JSON.stringify(corps)});
+  let j={}; try{ j=await r.json(); }catch(e){}
+  if(!r.ok){ throw new Error(j.erreur||("HTTP "+r.status)); }
+  return j;
+}
+
+// ---------------------------------------------------------------- rendu ----
+function rendreControle(c){
+  for(const cle of ["recon","hunt"]){
+    const b=$("sw-"+cle), st=c[cle];
+    const actif = st ? st.actif : true;
+    b.className="sw "+(actif?"on":"off");
+    b.textContent=(cle==="recon"?"recon ":"chasse ")+(actif?"ON":"OFF");
+    b.onclick=async()=>{
+      // Off = on ne PREND plus de nouveau job ; ce qui tourne continue. Couper une
+      // session en cours est une action distincte, jamais un effet de bord.
+      try{ await poster("/api/ops/controle",{cle:cle,actif:!actif});
+           dire("interrupteur "+cle+" → "+(!actif?"ON":"OFF"),true); charger(); }
+      catch(e){ dire(e.message,false); }
+    };
+  }
+  const parts=Object.values(c).filter(x=>x.maj_par).map(x=>x.cle+" par "+x.maj_par+" "+heure(x.maj_le));
+  $("ctrl-info").textContent=parts.join(" · ");
+}
+
+function rendreRunners(rs){
+  const tb=$("runners"); tb.innerHTML="";
+  $("no-runners").style.display=rs.length?"none":"block";
+  const prets=new Set();
+  for(const r of rs){
+    // Un runner muet depuis > 60 s ne prendra rien : le dire tout de suite, sinon un
+    // job resterait « en attente » indéfiniment avec l'air d'être pris en charge.
+    const vieux=r.age_s>60;
+    const tr=document.createElement("tr");
+    tr.innerHTML=`<td>${esc(r.nom)}</td><td>${esc(r.phase)}</td>
+      <td class="${vieux?'bad':'good'}">il y a ${duree(r.age_s)}${vieux?" ⚠ muet":""}</td>
+      <td class="n">${r.jobs_actifs??"?"} / ${r.jobs_max??"?"}</td>
+      <td class="k">${esc(r.ip_sortie)}</td><td class="n">${r.nb_prets}</td>`;
+    tb.appendChild(tr);
+  }
+}
+
+function rendreVivants(js){
+  const tb=$("vivants"); tb.innerHTML="";
+  $("no-vivants").style.display=js.length?"none":"block";
+  for(const j of js){
+    const tr=document.createElement("tr");
+    const stop=j.stop_demande?'<span class="warn">arrêt demandé…</span>':
+      `<button data-id="${j.id}">■ stop</button>`;
+    tr.innerHTML=`<td class="n">${j.id}</td><td>${esc(j.phase)}</td><td>${esc(j.host)}</td>
+      <td><span class="et ${j.etat}">${esc(j.etat)}</span></td>
+      <td class="n">${duree(j.age_s)}</td>
+      <td class="opts">${esc(optsTxt(j.options))}</td>
+      <td class="k">${esc(j.demande_par)}</td>
+      <td class="k">${esc(j.runner)||"—"}</td><td>${stop}</td>`;
+    const b=tr.querySelector("button");
+    if(b) b.onclick=async()=>{
+      if(j.etat==="en_cours" && !confirm("Couper "+j.phase+" sur "+j.host+" ? Le travail déjà écrit (journal, findings) est conservé."))return;
+      b.disabled=true;
+      try{ await poster("/api/ops/arreter",{id:j.id}); dire("arrêt demandé pour #"+j.id,true); charger(); }
+      catch(e){ dire(e.message,false); b.disabled=false; }
+    };
+    tb.appendChild(tr);
+  }
+}
+
+function rendreHisto(js){
+  const tb=$("histo"); tb.innerHTML="";
+  for(const j of js){
+    const tr=document.createElement("tr");
+    tr.innerHTML=`<td class="n">${j.id}</td><td>${esc(j.phase)}</td><td>${esc(j.host)}</td>
+      <td><span class="et ${j.etat}">${esc(j.etat)}</span></td>
+      <td class="n">${duree(j.duree_s)}</td><td class="n">${j.rc??"—"}</td>
+      <td class="k">${heure(j.fin_le||j.demande_le)}</td>
+      <td class="k">${esc(j.demande_par)}</td>
+      <td class="k">${esc(j.message)||""}</td>`;
+    tb.appendChild(tr);
+  }
+}
+
+// ---------------------------------------------------------- rafraîchissement ----
+async function charger(){
+  if(enVol) return; enVol=true;
+  try{
+    const r=await fetch("/api/ops/etat");
+    const d=await r.json();
+    if(!r.ok){ dire(d.erreur||("HTTP "+r.status),false); return; }
+    ETAT=d;
+    rendreControle(d.controle); rendreRunners(d.runners);
+    rendreVivants(d.vivants);   rendreHisto(d.historique);
+    $("tick").textContent="maj "+new Date().toLocaleTimeString("fr-FR");
+  }catch(e){ $("tick").textContent="hors ligne"; }
+  finally{ enVol=false; }
+}
+
+// ------------------------------------------------------------------ actions ----
+$("phase").onchange=()=>{
+  const h=$("phase").value==="hunt";
+  $("opt-recon").style.display=h?"none":"";
+  $("opt-hunt").style.display=h?"":"none";
+};
+$("go").onclick=async()=>{
+  const host=$("host").value.trim().toLowerCase(), phase=$("phase").value;
+  if(!host){ dire("host manquant",false); return; }
+  const options = phase==="recon"
+    ? {profile:$("profile").value, rate:+$("rate").value, force:$("force").checked}
+    : {model:$("model").value, effort:$("effort").value, timeout_h:+$("timeout_h").value};
+  $("go").disabled=true;
+  try{
+    const j=await poster("/api/ops/lancer",{host:host,phase:phase,options:options});
+    dire("job #"+j.id+" en file : "+phase+" "+host+(j.avertissement?" — "+j.avertissement:""),true);
+    $("host").value=""; charger();
+  }catch(e){ dire(e.message,false); }
+  finally{ $("go").disabled=false; }
+};
+$("couper").onclick=async()=>{
+  if(!confirm("TOUT COUPER : interrupteurs sur OFF, file vidée, arrêt demandé sur tout ce qui tourne.\n\nÀ n'utiliser que si l'IP se fait bannir ou qu'il faut rendre la main à la cible immédiatement."))return;
+  try{ const r=await poster("/api/ops/tout-couper",{});
+       dire(r.annules+" job(s) annulé(s), "+r.arrets_demandes+" arrêt(s) demandé(s)",true); charger(); }
+  catch(e){ dire(e.message,false); }
+};
+// Un onglet en arrière-plan n'a pas besoin de sonder : on ne rafraîchit que visible.
+setInterval(()=>{ if(!document.hidden) charger(); },5000);
+document.addEventListener("visibilitychange",()=>{ if(!document.hidden) charger(); });
+charger();
+</script>
+</body>
+</html>
