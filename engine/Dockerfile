@@ -25,6 +25,9 @@ COPY --from=tools /dl/subfinder /dl/httpx /dl/katana /usr/local/bin/
 
 COPY engine/requirements.txt ./engine/requirements.txt
 RUN pip install --no-cache-dir -r engine/requirements.txt
+# Valide tldextract avec le snapshot de suffixes BUNDLÉ (suffix_list_urls=()) : aucune
+# requête réseau au démarrage, comportement identique hors-ligne.
+RUN python -c "import tldextract; e=tldextract.TLDExtract(suffix_list_urls=())('a.example.co.uk'); assert e.registered_domain=='example.co.uk', e; print('tldextract OK (offline snapshot)')"
 
 COPY engine/ ./engine/
 COPY knowledge/ ./knowledge/
