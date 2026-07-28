@@ -97,6 +97,6 @@ def rebuild_leads(seuil=1):
     la MÊME logique que engine/leads.py (1b scope + 1c collapse) et REMPLACE la table.
     targets (détail par endpoint) reste intacte."""
     from engine import leads
-    lignes, st = leads.construire(seuil)
-    n = leads.persister(lignes)
+    lignes, st, remap = leads.construire(seuil)
+    n = leads.persister(lignes, remap)
     return {"persistes": n, **st}

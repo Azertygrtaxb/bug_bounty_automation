@@ -89,6 +89,29 @@ STATUT_DEFAUT = "a_voir"
 # supprime jamais (§0.4). Le quota s'applique à la LECTURE ; la table `leads` garde tout.
 MAX_LEADS_PAR_HOST = int(os.environ.get("MAX_LEADS_PAR_HOST", "5"))
 
+# --- Ordre d'avancement d'un statut (dernier = le plus avancé). Sert à résoudre une
+# COLLISION quand deux leads statutés se replient sur le même pattern : le plus avancé
+# gagne, les notes sont concaténées (jamais perdre du travail humain).
+ORDRE_STATUT = ["a_voir", "en_cours", "tue", "rapporte"]
+
+# --- Collapse : garde-fous BOLA -----------------------------------------------
+# B1 : ne JAMAIS replier un segment immédiatement suivi d'un {id}/{annee} — c'est le
+# TYPE D'OBJET (/api/user/{id} vs /api/order/{id}), la cible BOLA elle-même, pas du bruit.
+REPLIER_SEGMENT_AVANT_ID = os.environ.get("REPLIER_SEGMENT_AVANT_ID", "0").lower() in ("1", "true", "yes", "on")
+# B2 : ne replier une famille que si ses membres ont le MÊME profil de signal (même
+# score ET même ensemble de raisons). Profils différents = endpoints différents.
+COLLAPSE_EXIGE_MEME_PROFIL = os.environ.get("COLLAPSE_EXIGE_MEME_PROFIL", "1").lower() in ("1", "true", "yes", "on")
+
+# --- Paramètres de PAGINATION : bruit dans la vue leads. Dans patternize() UNIQUEMENT,
+# ces clés de query sont normalisées en {*} quelle que soit leur valeur (?page=1/2/3 =>
+# une seule famille). À NE PAS confondre avec les params volatils du hash de dédup
+# (knowledge/dedup) qui doivent rester intacts. `p` reste HORS de _ID_PARAM_KEYS (trop
+# générique pour être scoré comme un id) mais est neutralisé ici.
+PARAMS_PAGINATION = {
+    "page", "p", "pageno", "pagenum", "offset", "start", "limit",
+    "per_page", "from", "size", "num",
+}
+
 
 def deep_rank(score_shallow, tech, host, paths):
     """Renvoie (deep_rank:int, detail:dict). detail expose chaque composante pour

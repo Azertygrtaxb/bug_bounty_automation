@@ -61,7 +61,9 @@ def patternize(url):
     parts = []
     for k, v in parse_qsl(p.query, keep_blank_values=True):
         kl = k.lower()
-        if v and (kl in _ID_KEYS or kl.endswith("_id") or kl == "id"):
+        if kl in config.PARAMS_PAGINATION:      # pagination = bruit -> {*} quelle que soit la valeur
+            parts.append("%s={*}" % k)
+        elif v and (kl in _ID_KEYS or kl.endswith("_id") or kl == "id"):
             parts.append("%s={id}" % k)
         elif _est_annee_chemin(v):
             parts.append("%s={annee}" % k)
@@ -97,17 +99,29 @@ def _join_pattern(segs, pairs):
     return path
 
 
-def _collapse_freres(patterns_par_host):
+def _famille_homogene(membres, prof):
+    """B2 : tous les membres ont le même profil de signal (score + ensemble de raisons).
+    Profils différents = endpoints différents = on ne fusionne pas. Profil manquant
+    (None) -> considéré hétérogène par prudence."""
+    if not config.COLLAPSE_EXIGE_MEME_PROFIL:
+        return True
+    profils = {prof.get(p) for p in membres}
+    return len(profils) == 1 and None not in profils
+
+
+def _collapse_freres(patterns_par_host, profil=None):
     """COLLAPSE GÉNÉRALISÉ. Deux patterns d'un même host sont FRÈRES s'ils ont le même
     nombre de segments de chemin, le même ensemble de CLÉS de query, et ne diffèrent QUE
     sur UN seul segment de chemin (position quelconque) OU QUE sur des VALEURS de query.
-    >= COLLAPSE_PREFIXE_MIN frères -> le slot qui varie est replié en {*}, on garde le
-    représentant au score max (via la clé de groupe). Jamais on ne replie un {id}/{annee}
-    (c'est le signal). UN SEUL segment de chemin replié à la fois : si deux positions
-    varient, on laisse distinct. Renvoie {(host, pattern): pattern_replié}.
+    >= COLLAPSE_PREFIXE_MIN frères ET profil homogène (B2) -> le slot qui varie est replié
+    en {*}, on garde le représentant au score max. Jamais on ne replie un {id}/{annee}
+    (c'est le signal), NI le segment juste AVANT un {id}/{annee} (B1 : c'est le TYPE
+    D'OBJET, la cible BOLA). UN SEUL segment de chemin replié à la fois. Renvoie
+    {(host, pattern): pattern_replié}. `profil` = {(host, pattern): (score, frozenset(raisons))}.
 
     Chaque pattern retient le repli dont la FAMILLE est la plus grande (>= MIN)."""
     seuil = config.COLLAPSE_PREFIXE_MIN
+    profil = profil or {}
     par_host = defaultdict(list)
     for host, pat in patterns_par_host:
         par_host[host].append(pat)
@@ -116,9 +130,11 @@ def _collapse_freres(patterns_par_host):
     for host in sorted(par_host):
         pats = sorted(dict.fromkeys(par_host[host]))       # unique, ordre déterministe
         parsed = {p: _split_pattern(p) for p in pats}
+        prof = {p: profil.get((host, p)) for p in pats}    # profil local au host
 
         # (A) familles PATH : un seul segment (non-marqueur) remplacé par {*}, query
         # identique. genkey inclut la query complète -> frères = même query exacte.
+        # B1 : on n'engendre PAS de candidat sur un segment suivi d'un {id}/{annee}.
         path_fam = defaultdict(set)
         path_folded = {}
         for p in pats:
@@ -126,6 +142,9 @@ def _collapse_freres(patterns_par_host):
             for i, seg in enumerate(segs):
                 if _est_marqueur(seg) or seg == "":
                     continue
+                if (not config.REPLIER_SEGMENT_AVANT_ID and i + 1 < len(segs)
+                        and segs[i + 1] in ("{id}", "{annee}")):
+                    continue  # segment = TYPE D'OBJET devant un id -> intouchable (B1)
                 ns = list(segs); ns[i] = "{*}"
                 gk = ("P", tuple(ns), tuple(pairs))
                 path_fam[gk].add(p)
@@ -146,7 +165,7 @@ def _collapse_freres(patterns_par_host):
         best = {}  # pattern -> (taille_famille, pattern_replié)
 
         for gk, membres in path_fam.items():
-            if len(membres) < seuil:
+            if len(membres) < seuil or not _famille_homogene(membres, prof):
                 continue
             for p in membres:
                 cand = (len(membres), path_folded[(p, gk)])
@@ -154,7 +173,7 @@ def _collapse_freres(patterns_par_host):
                     best[p] = cand
 
         for loose, membres in q_fam.items():
-            if len(membres) < seuil:
+            if len(membres) < seuil or not _famille_homogene(membres, prof):
                 continue
             segs = list(loose[1])
             nb_cles = len(loose[2])
@@ -192,14 +211,16 @@ def _assurer_table(cur):
     cur.execute(
         "CREATE TABLE IF NOT EXISTS leads_statut ("
         " host TEXT NOT NULL, pattern TEXT NOT NULL, statut TEXT DEFAULT 'a_voir',"
-        " note TEXT, updated_at TIMESTAMPTZ DEFAULT now(),"
+        " note TEXT, orphelin BOOLEAN DEFAULT false, updated_at TIMESTAMPTZ DEFAULT now(),"
         " PRIMARY KEY (host, pattern))")
+    cur.execute("ALTER TABLE leads_statut ADD COLUMN IF NOT EXISTS orphelin BOOLEAN DEFAULT false")
 
 
 def construire(seuil=1):
-    """Calcule les leads curés (1b scope + 1c collapse). Renvoie (lignes, stats).
+    """Calcule les leads curés (1b scope + 1c collapse). Renvoie (lignes, stats, remap).
     Chaque ligne = {host, pattern, url_representative, score, raisons, nb, http_status,
-    tech, in_scope} (le représentant = le membre au score MAX du groupe). Écrit aussi
+    tech, in_scope} (le représentant = le membre au score MAX du groupe). `remap` =
+    {(host, pattern_avant): pattern_apres} pour migrer leads_statut. Écrit aussi
     tags.lead_pattern sur targets (groupement dashboard). N'ÉCRIT PAS dans `leads` :
     c'est persister() qui le fait (séparation calcul / écriture)."""
     with psycopg.connect(DATABASE_URL) as conn:
@@ -233,8 +254,17 @@ def construire(seuil=1):
                 if (g["tags"] or {}).get("lead_pattern") != pat:
                     cur.execute("UPDATE targets SET tags = jsonb_set(COALESCE(tags,'{}'::jsonb), "
                                 "'{lead_pattern}', to_jsonb(%s::text)) WHERE id = %s", (pat, g["id"]))
-            # collapse des frères à préfixe commun
-            remap = _collapse_freres({(g["host"], g["pattern"]) for g in gardes})
+            # Profil de signal par (host, pattern) = celui du membre au score MAX (base de
+            # la garde d'homogénéité B2). raisons en frozenset (ordre non signifiant).
+            profil = {}
+            for g in gardes:
+                key = (g["host"], g["pattern"])
+                p = (g["score"], frozenset(g["raisons"]))
+                cur_prof = profil.get(key)
+                if cur_prof is None or g["score"] > cur_prof[0]:
+                    profil[key] = p
+            # collapse généralisé (B1 segment-avant-id + B2 homogénéité de profil)
+            remap = _collapse_freres({(g["host"], g["pattern"]) for g in gardes}, profil)
             groupes = {}  # (host, pattern_final) -> {nb, score_max, representant}
             for g in gardes:
                 pat = remap.get((g["host"], g["pattern"]), g["pattern"])
@@ -253,14 +283,73 @@ def construire(seuil=1):
                        "http_status": rep["http_status"], "tech": rep["tech"],
                        "in_scope": rep["in_scope"]})
     lignes.sort(key=lambda x: (x["score"], x["nb"]), reverse=True)
+    # remap {(host, pattern_avant_collapse): pattern_apres} pour migrer les statuts.
     return lignes, {"brut": brut, "apres_1b": apres_1b, "exclus_hors_cible": exclus_hc,
-                    "apres_1c": len(lignes)}
+                    "apres_1c": len(lignes)}, remap
 
 
-def persister(lignes):
+def _rang_statut(statut):
+    """Position dans ORDRE_STATUT (plus grand = plus avancé). Inconnu -> -1."""
+    o = config.ORDRE_STATUT
+    return o.index(statut) if statut in o else -1
+
+
+def _migrer_statut(cur, remap):
+    """A2 — migre leads_statut à travers le remap {(host, avant): apres} AVANT de
+    réécrire `leads`. Ne truncate JAMAIS la table : seules les clés RENOMMÉES bougent.
+    Collision (plusieurs sources -> même cible, ou cible déjà statutée) : on garde le
+    statut le PLUS AVANCÉ (ORDRE_STATUT) et on CONCATÈNE les notes (jamais perdre une
+    note humaine)."""
+    renames = {(h, a): (h, ap) for (h, a), ap in remap.items() if a != ap}
+    if not renames:
+        return 0
+    cur.execute("SELECT host, pattern, statut, note FROM leads_statut")
+    existing = {(h, p): (s, n) for h, p, s, n in cur.fetchall()}
+    sources = [k for k in renames if k in existing]
+    if not sources:
+        return 0
+    # agrège vers chaque clé cible (en incluant un statut déjà présent sur la cible)
+    cibles = {}
+    for src in sources:
+        dst = renames[src]
+        agg = cibles.setdefault(dst, {"statut": "a_voir", "notes": []})
+        s, n = existing[src]
+        if _rang_statut(s) >= _rang_statut(agg["statut"]):
+            agg["statut"] = s
+        if n:
+            agg["notes"].append(n)
+    for dst, agg in cibles.items():
+        if dst in existing:
+            s, n = existing[dst]
+            if _rang_statut(s) >= _rang_statut(agg["statut"]):
+                agg["statut"] = s
+            if n and n not in agg["notes"]:
+                agg["notes"].append(n)
+    # applique : supprime les sources renommées, upsert les cibles fusionnées
+    for h, p in sources:
+        cur.execute("DELETE FROM leads_statut WHERE host = %s AND pattern = %s", (h, p))
+    for (h, p), agg in cibles.items():
+        note = " | ".join(agg["notes"]) if agg["notes"] else None
+        cur.execute(
+            "INSERT INTO leads_statut (host, pattern, statut, note, orphelin, updated_at) "
+            "VALUES (%s, %s, %s, %s, false, now()) ON CONFLICT (host, pattern) DO UPDATE "
+            "SET statut = EXCLUDED.statut, note = EXCLUDED.note, orphelin = false, "
+            "updated_at = now()", (h, p, agg["statut"], note))
+    return len(sources)
+
+
+def _marquer_orphelins(cur):
+    """A3 — un statut dont la clé n'existe plus dans `leads` = ORPHELIN. On le MARQUE
+    (jamais supprimé) ; ceux qui réapparaissent repassent orphelin=false."""
+    cur.execute("UPDATE leads_statut s SET orphelin = NOT EXISTS "
+                "(SELECT 1 FROM leads l WHERE l.host = s.host AND l.pattern = s.pattern)")
+
+
+def persister(lignes, remap=None):
     """Remplace TOUT le contenu de `leads` par `lignes`. GARDE-FOU (A4) : liste VIDE ->
-    on NE truncate PAS (un rebuild raté ne doit jamais vider le board), on avertit et
-    on sort. `leads_statut` (donnée humaine) n'est jamais touchée ici."""
+    on NE truncate PAS (un rebuild raté ne doit jamais vider le board), on avertit et on
+    sort. AVANT la réécriture, migre les statuts à travers `remap` (A2) ; APRÈS, marque
+    les statuts orphelins (A3). `leads_statut` n'est jamais truncatée."""
     if not lignes:
         sys.stderr.write("[leads] AVERTISSEMENT : rebuild VIDE -> table `leads` NON "
                          "touchée (garde-fou A4).\n")
@@ -268,14 +357,26 @@ def persister(lignes):
     with psycopg.connect(DATABASE_URL) as conn:
         with conn.cursor() as cur:
             _assurer_table(cur)
+            if remap:
+                _migrer_statut(cur, remap)
             cur.execute("TRUNCATE leads")
             cur.executemany(
                 "INSERT INTO leads (host, pattern, url_representative, score, raisons, "
                 "nb, http_status, tech, in_scope, updated_at) VALUES "
                 "(%(host)s, %(pattern)s, %(url_representative)s, %(score)s, %(raisons)s, "
                 "%(nb)s, %(http_status)s, %(tech)s, %(in_scope)s, now())", lignes)
+            _marquer_orphelins(cur)
         conn.commit()
     return len(lignes)
+
+
+def lister_orphelins():
+    """Statuts dont la clé n'existe plus dans `leads` (travail humain à re-router)."""
+    with psycopg.connect(DATABASE_URL) as conn, conn.cursor() as cur:
+        cur.execute("SELECT host, pattern, statut, note FROM leads_statut "
+                    "WHERE orphelin ORDER BY host, pattern")
+        return [{"host": h, "pattern": p, "statut": s, "note": n}
+                for h, p, s, n in cur.fetchall()]
 
 
 def marquer(host, pattern, statut, note=None):
@@ -315,16 +416,17 @@ def _appliquer_quota(rows):
                         "url_representative": None, "score": reste[0]["score"],
                         "raisons": ["quota_host(%d masqués)" % len(reste)], "nb": None,
                         "http_status": None, "tech": [], "in_scope": True,
-                        "statut": "-", "note": None, "_repli": True})
+                        "statut": "-", "note": None, "type": "repli"})
     out.sort(key=lambda x: (x["score"], x["nb"] or 0), reverse=True)
     return out
 
 
-def lire(seuil=1):
+def lire(seuil=1, quota=True):
     """Lit `leads` (source de vérité) + LEFT JOIN leads_statut (statut/​note, défaut
-    'a_voir') — AUCUN recalcul — puis applique le quota par host. Base export/dashboard."""
+    'a_voir') — AUCUN recalcul, AUCUN DDL (C1 : lecture 100% read-only, compatible user
+    postgres restreint). `quota=False` -> liste brute sans repli (C2, pour API/export
+    machine). Chaque ligne porte `type` = 'lead' | 'repli' (C3)."""
     with psycopg.connect(DATABASE_URL) as conn, conn.cursor() as cur:
-        _assurer_table(cur)
         cur.execute("SELECT l.host, l.pattern, l.url_representative, l.score, l.raisons, "
                     "l.nb, l.http_status, l.tech, l.in_scope, "
                     "COALESCE(s.statut, %s) AS statut, s.note "
@@ -333,8 +435,8 @@ def lire(seuil=1):
                     "WHERE l.score >= %s ORDER BY l.score DESC, l.nb DESC",
                     (config.STATUT_DEFAUT, seuil))
         cols = [d[0] for d in cur.description]
-        rows = [dict(zip(cols, r)) for r in cur.fetchall()]
-    return _appliquer_quota(rows)
+        rows = [dict(zip(cols, r), type="lead") for r in cur.fetchall()]
+    return _appliquer_quota(rows) if quota else rows
 
 
 def main(argv):
@@ -346,32 +448,41 @@ def main(argv):
         print("statut '%s' posé sur %s %s" % (statut, host, pattern))
         return 0
 
+    if "--orphelins" in argv:  # statuts dont la clé n'existe plus dans `leads`
+        orph = lister_orphelins()
+        print("=== %d STATUT(S) ORPHELIN(S) (jamais supprimés — à re-router) ===" % len(orph))
+        for o in orph:
+            print("  [%s] %s %s  note=%s" % (o["statut"], o["host"], o["pattern"], o["note"]))
+        return 0
+
     seuil = next((int(a) for a in argv if a.isdigit()), 1)
     if "--rebuild" in argv:  # recalcule (1b+1c) et remplace la table
-        lignes, st = construire(seuil)
-        n = persister(lignes)
+        lignes, st, remap = construire(seuil)
+        n = persister(lignes, remap)
         print("=== REBUILD leads (seuil>=%d) : brut %d -> 1b %d (hors-scope exclus %d) "
               "-> 1c %d => %d persistés ===" % (seuil, st["brut"], st["apres_1b"],
                                                 st["exclus_hors_cible"], st["apres_1c"], n))
 
     # AFFICHAGE + EXPORT : lecture depuis la table `leads` (+ statut + quota), pas de recalcul.
     lignes = lire(seuil)
-    print("%-5s %-4s %-9s %-38s %s" % ("score", "nb", "statut", "host", "pattern"))
+    print("%-5s %-4s %-9s %-6s %-38s %s" % ("score", "nb", "statut", "type", "host", "pattern"))
     for r in lignes[:40]:
         nb = str(r["nb"]) if r["nb"] is not None else "-"
-        print("%-5d %-4s %-9s %-38s %s" % (r["score"], nb, (r.get("statut") or "-")[:9],
-                                           r["host"][:38], r["pattern"][:70]))
+        print("%-5d %-4s %-9s %-6s %-38s %s" % (r["score"], nb, (r.get("statut") or "-")[:9],
+                                                r.get("type", "lead"), r["host"][:38],
+                                                r["pattern"][:70]))
     if "--csv" in argv:
         chemin = argv[argv.index("--csv") + 1]
         import csv as _csv
         with open(chemin, "w", newline="", encoding="utf-8") as fh:
             w = _csv.writer(fh)
-            w.writerow(["score", "nb", "statut", "host", "pattern", "url_representative",
-                        "http_status", "in_scope", "note", "raisons"])
+            w.writerow(["type", "score", "nb", "statut", "host", "pattern",
+                        "url_representative", "http_status", "in_scope", "note", "raisons"])
             for r in lignes:
-                w.writerow([r["score"], r["nb"], r.get("statut"), r["host"], r["pattern"],
-                            r["url_representative"], r["http_status"], r["in_scope"],
-                            r.get("note"), ",".join(r["raisons"] or [])])
+                w.writerow([r.get("type", "lead"), r["score"], r["nb"], r.get("statut"),
+                            r["host"], r["pattern"], r["url_representative"],
+                            r["http_status"], r["in_scope"], r.get("note"),
+                            ",".join(r["raisons"] or [])])
         print("CSV (depuis la table leads) -> %s (%d lignes)" % (chemin, len(lignes)))
     return 0
 
