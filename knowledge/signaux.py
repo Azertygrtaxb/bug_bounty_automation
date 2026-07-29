@@ -143,6 +143,17 @@ STATIC_INFO_PATTERNS = [
 ]
 _STATIC_INFO_RE = re.compile("|".join(STATIC_INFO_PATTERNS), re.IGNORECASE)
 
+# --- C2 : indices de CONTENU STATIQUE/éditorial (démote flux_auth & mouvement_argent qui
+# sinon scorent un catalogue de fonds public ou une archive WordPress). CMS de contenu +
+# notion de SLUG (segment long à tirets = titre d'article, pas un segment de route).
+# Tout éditable §14, aucun host en dur.
+CMS_CONTENU = {
+    "wordpress", "joomla", "drupal", "typo3", "spip", "ghost", "wix", "squarespace",
+    "prestashop", "magento", "contao", "concrete5", "sitecore",
+}
+SLUG_LONGUEUR_MIN = 12   # un segment >= 12 chars ET >= 2 tirets est un slug de contenu
+SLUG_MIN_TIRETS = 2
+
 # --- Chemins-signature d'un produit : LA surface d'attaque réelle (portail,
 # console), par famille. Éditable. Un endpoint dont le chemin matche => plein
 # tarif du fingerprint ; sinon => résidu faible (le host tourne le produit, mais
@@ -267,6 +278,11 @@ TIMESTAMP_MIN_DIGITS = 10
 MAX_ID_PLAUSIBLE = 1_000_000_000
 TIMESTAMP_POIDS = 0
 
+# --- C1 : un id PRÉCÉDÉ d'un segment année (/2019/42/..., /{annee}/{id}/{id}/slug) est un
+# permalien d'ARCHIVE (WordPress/CMS de dates), pas une référence d'objet métier. Il ne
+# reçoit qu'un bonus résiduel. Éditable §14.
+ID_APRES_ANNEE_POIDS = 0
+
 
 def _est_annee_chemin(seg):
     return len(seg) == 4 and seg.isdigit() and ANNEE_MIN <= int(seg) <= ANNEE_MAX
@@ -303,13 +319,25 @@ def id_non_derive_session(t):
     parts = urlsplit(_url(t))
     best = 0
 
-    # Segments de chemin purement numériques : /account/42
-    # (ANNÉE nue et TIMESTAMP/cache-buster neutralisés ; un id réaliste reste un id)
+    # Segments de chemin : id numérique (/account/42) ou UUID. ANNÉE/TIMESTAMP neutralisés.
+    # C1 : dès qu'une ANNÉE est vue en amont, les id suivants = archive de dates -> résiduel.
+    annee_vue = False
     for seg in parts.path.split("/"):
+        if not seg:
+            continue
+        if _est_annee_chemin(seg):
+            annee_vue = True
+            continue
+        w = 0
         if seg.isdigit():
-            best = max(best, _poids_num_chemin(seg))
-    # UUID n'importe où dans le chemin ou la requête
-    if _UUID_ANY.search(parts.path) or _UUID_ANY.search(parts.query):
+            w = _poids_num_chemin(seg)
+        elif _UUID_ANY.search(seg):
+            w = 3
+        if w and annee_vue:
+            w = min(w, ID_APRES_ANNEE_POIDS)   # id sous un ancêtre année = permalien d'archive
+        best = max(best, w)
+    # UUID en requête (les params gardent leur logique propre ci-dessous)
+    if _UUID_ANY.search(parts.query):
         best = max(best, 3)
     # Paramètres de requête qui désignent un identifiant : customerId=, id=...
     for key, value in parse_qsl(parts.query, keep_blank_values=True):
@@ -383,25 +411,60 @@ def fingerprint_produit(t):
     return max(1, poids // FINGERPRINT_RESIDU_DIVISEUR)
 
 
+def _tech_cms_contenu(t):
+    hay = " ".join(t.get("tech") or []).lower()
+    return any(cms in hay for cms in CMS_CONTENU)
+
+
+def _est_slug(seg):
+    """Segment long à tirets = titre d'article/slug de contenu (nom-du-fonds,
+    lassociation-a-i-l-e-r-o-n-s), pas un segment de ROUTE."""
+    return len(seg) >= SLUG_LONGUEUR_MIN and seg.count("-") >= SLUG_MIN_TIRETS
+
+
+def _contenu_statique(t):
+    """C2 — page manifestement éditoriale/statique : page info (mentions/cookies…) OU
+    CMS de contenu détecté. Sur une telle page, flux_auth/mouvement_argent sont du bruit."""
+    return _is_static_info(t) or _tech_cms_contenu(t)
+
+
+def _match_route(regex, t):
+    """True si le motif matche un segment de ROUTE (ou la query), pas seulement un SLUG.
+    Un mot-clé qui n'apparaît que dans un slug de titre est incident, pas une surface."""
+    parts = urlsplit(_url(t))
+    for seg in parts.path.split("/"):
+        if not seg or _est_slug(seg):
+            continue
+        if regex.search(seg):
+            return True
+    return bool(regex.search(parts.query))
+
+
 def flux_auth(t):
-    """BOOLÉEN. Flux d'authentification : login/logout/register/reset/token...
-    Cherché dans le chemin+requête ET dans le title : un portail de login peut
-    avoir un chemin muet (login à la racine /) mais un title parlant
-    (« Authentification », « Connexion », « Sign in »). Assets exclus."""
+    """BOOLÉEN. Flux d'authentification : login/logout/register/reset/token... Cherché dans
+    le chemin+requête ET le title. Assets exclus. C2 : démonté si la page est du contenu
+    statique (CMS de contenu / page info) ou si le mot ne tombe que dans un slug de titre."""
     if _hors_surface(t):
         return False
-    if _AUTH.search(_signal_haystack(t)):
-        return True
     title = (t.get("tags") or {}).get("title") or ""
-    return bool(_AUTH.search(title))
+    if not (_AUTH.search(_signal_haystack(t)) or _AUTH.search(title)):
+        return False
+    if _contenu_statique(t):
+        return False
+    return _match_route(_AUTH, t) or bool(_AUTH.search(title))
 
 
 def mouvement_argent(t):
-    """BOOLÉEN. Logique métier à enjeu : virement/payment/transfer/montant/amount...
-    Testé sur le chemin+requête (host retiré) ; les assets statiques sont exclus."""
+    """BOOLÉEN. Logique métier à enjeu : virement/payment/transfer/montant/amount... Chemin+
+    requête (host retiré), assets exclus. C2 : démonté sur du contenu statique (CMS/page info)
+    ou quand le mot ne tombe que dans un slug (catalogue de fonds public, archive WordPress)."""
     if _hors_surface(t):
         return False
-    return bool(_ARGENT.search(_signal_haystack(t)))
+    if not _ARGENT.search(_signal_haystack(t)):
+        return False
+    if _contenu_statique(t):
+        return False
+    return _match_route(_ARGENT, t)
 
 
 def surface_exposee(t):
@@ -532,7 +595,10 @@ def _techs_effectives(t):
 
 def tech_obsolete(t):
     """GRADUÉ. Techno détectée SOUS sa version plancher sûre -> surface de CVE.
-    +POIDS gradué par l'écart de version MAJEURE (plafonné). Écart MAX pris."""
+    +POIDS gradué par l'écart de version MAJEURE (plafonné). Écart MAX pris.
+    C3 : signal de HOST -> jamais appliqué à une URL d'ASSET (/…/gtm.js, .min.js)."""
+    if _is_asset(t) or _is_asset_dir(t):
+        return 0
     best = 0
     for item in _techs_effectives(t):
         nom, ver = _split_tech(item)
@@ -549,7 +615,10 @@ def tech_obsolete(t):
 
 def tech_eol(t):
     """BOOLÉEN. Techno END-OF-LIFE (AngularJS/Plone/Flash/ColdFusion...) présente
-    dans tech[] ou le header Server -> surface de CVE non corrigeable."""
+    dans tech[] ou le header Server -> surface de CVE non corrigeable.
+    C3 : signal de HOST -> jamais appliqué à une URL d'ASSET."""
+    if _is_asset(t) or _is_asset_dir(t):
+        return False
     for item in _techs_effectives(t):
         nom, _ = _split_tech(item)
         if nom in TECH_EOL:

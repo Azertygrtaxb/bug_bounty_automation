@@ -110,9 +110,12 @@ ORDRE_STATUT = ["a_voir", "en_cours", "tue", "rapporte"]
 # B1 : ne JAMAIS replier un segment immédiatement suivi d'un {id}/{annee} — c'est le
 # TYPE D'OBJET (/api/user/{id} vs /api/order/{id}), la cible BOLA elle-même, pas du bruit.
 REPLIER_SEGMENT_AVANT_ID = os.environ.get("REPLIER_SEGMENT_AVANT_ID", "0").lower() in ("1", "true", "yes", "on")
-# B2 : ne replier une famille que si ses membres ont le MÊME profil de signal (même
-# score ET même ensemble de raisons). Profils différents = endpoints différents.
+# B2 : ne replier une famille que si ses membres ont le MÊME profil de signal. C4 : la
+# comparaison EXACTE (score + chaînes de raisons) était trop stricte — une nuance de poids
+# (host_vieux_copyright(+2) vs (+3)) rendait des frères hétérogènes. On compare désormais les
+# FAMILLES de signaux (noms sans pondérations) et on tolère un écart de score ECART_COLLAPSE_MAX.
 COLLAPSE_EXIGE_MEME_PROFIL = os.environ.get("COLLAPSE_EXIGE_MEME_PROFIL", "1").lower() in ("1", "true", "yes", "on")
+ECART_COLLAPSE_MAX = int(os.environ.get("ECART_COLLAPSE_MAX", "2"))
 
 # --- Paramètres de PAGINATION : bruit dans la vue leads. Dans patternize() UNIQUEMENT,
 # ces clés de query sont normalisées en {*} quelle que soit leur valeur (?page=1/2/3 =>

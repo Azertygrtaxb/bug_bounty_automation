@@ -99,14 +99,31 @@ def _join_pattern(segs, pairs):
     return path
 
 
+def _famille_raison(r):
+    """Nom de FAMILLE d'une raison, sans sa pondération : 'tech_obsolete(+2)' -> 'tech_obsolete',
+    'host_vieux_copyright(+3)' -> 'host_vieux_copyright', 'catch-all: …' -> 'catch-all'."""
+    return r.split("(")[0].split(":")[0].strip()
+
+
+def _profil(score, raisons):
+    """Profil de signal d'un membre : (score, ensemble de FAMILLES de raisons)."""
+    return (score, frozenset(_famille_raison(r) for r in (raisons or [])))
+
+
 def _famille_homogene(membres, prof):
-    """B2 : tous les membres ont le même profil de signal (score + ensemble de raisons).
-    Profils différents = endpoints différents = on ne fusionne pas. Profil manquant
-    (None) -> considéré hétérogène par prudence."""
+    """B2/C4 : on ne replie une famille que si ses membres partagent le MÊME ensemble de
+    FAMILLES de signaux (noms sans pondérations) ET un écart de score <= ECART_COLLAPSE_MAX.
+    Assoupli vs l'égalité exacte (une nuance de poids ne casse plus le repli). Profil manquant
+    -> hétérogène par prudence."""
     if not config.COLLAPSE_EXIGE_MEME_PROFIL:
         return True
-    profils = {prof.get(p) for p in membres}
-    return len(profils) == 1 and None not in profils
+    profs = [prof.get(p) for p in membres]
+    if any(pr is None for pr in profs):
+        return False
+    if len({pr[1] for pr in profs}) != 1:              # mêmes familles de signaux
+        return False
+    scores = [pr[0] for pr in profs]
+    return max(scores) - min(scores) <= config.ECART_COLLAPSE_MAX
 
 
 def _collapse_freres(patterns_par_host, profil=None):
@@ -258,14 +275,13 @@ def construire(seuil=1):
                     cur.execute("UPDATE targets SET tags = jsonb_set(COALESCE(tags,'{}'::jsonb), "
                                 "'{lead_pattern}', to_jsonb(%s::text)) WHERE id = %s", (pat, g["id"]))
             # Profil de signal par (host, pattern) = celui du membre au score MAX (base de
-            # la garde d'homogénéité B2). raisons en frozenset (ordre non signifiant).
+            # la garde d'homogénéité B2/C4 : familles de signaux + écart de score toléré).
             profil = {}
             for g in gardes:
                 key = (g["host"], g["pattern"])
-                p = (g["score"], frozenset(g["raisons"]))
                 cur_prof = profil.get(key)
                 if cur_prof is None or g["score"] > cur_prof[0]:
-                    profil[key] = p
+                    profil[key] = _profil(g["score"], g["raisons"])
             # collapse généralisé (B1 segment-avant-id + B2 homogénéité de profil)
             remap = _collapse_freres({(g["host"], g["pattern"]) for g in gardes}, profil)
             groupes = {}  # (host, pattern_final) -> {nb, score_max, representant, premiere_vue}
