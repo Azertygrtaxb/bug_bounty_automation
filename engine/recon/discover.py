@@ -12,7 +12,7 @@ from psycopg.types.json import Json
 
 from engine import ratelimit
 from engine.celery_app import app
-from engine.recon import tools
+from engine.recon import binaires, tools
 from engine.recon.normalize import compute_tags, dedup_key, normalize_url, url_hash
 from knowledge.signaux import ASSET_EXTENSIONS
 
@@ -154,6 +154,9 @@ def _recon_pipeline(host, shallow):
     (rapide, tue les morts en secondes) ; shallow=False : crawl profond + JS (deep).
     Un host non vivant n'insère rien (0 ligne = mort, tué au tier 1)."""
     tier = "shallow" if shallow else "deep"
+    # A1.3 : le worker peut avoir démarré sain puis être cassé -> on revérifie que la sonde
+    # HTTP est bien le binaire ProjectDiscovery. Sinon on LÈVE au lieu de rendre live_hosts:0.
+    binaires.exiger()
     # La liste 48k contient déjà les sous-domaines connus : par défaut on ne
     # ré-énumère PAS (subfinder est lent, OSINT) -> on httpx le host directement.
     subdomains = tools.run_subfinder(host) if ENUMERATE_SUBDOMAINS else [host]

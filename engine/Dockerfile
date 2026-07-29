@@ -21,17 +21,24 @@ WORKDIR /app
 RUN apt-get update \
  && apt-get install -y --no-install-recommends ca-certificates \
  && rm -rf /var/lib/apt/lists/*
-COPY --from=tools /dl/subfinder /dl/httpx /dl/katana /usr/local/bin/
 
+# pip D'ABORD : le SDK anthropic tire python-httpx, qui pose un script console `httpx` dans
+# /usr/local/bin. On installe donc les binaires ProjectDiscovery APRÈS, dans un répertoire
+# DÉDIÉ préfixé au PATH -> plus aucune dépendance Python ne peut les masquer (A1.1).
 COPY engine/requirements.txt ./engine/requirements.txt
 RUN pip install --no-cache-dir -r engine/requirements.txt
-# Valide tldextract avec le snapshot de suffixes BUNDLÉ (suffix_list_urls=()) : aucune
-# requête réseau au démarrage, comportement identique hors-ligne.
 RUN python -c "import tldextract; e=tldextract.TLDExtract(suffix_list_urls=())('a.example.co.uk'); assert e.registered_domain=='example.co.uk', e; print('tldextract OK (offline snapshot)')"
+
+COPY --from=tools /dl/subfinder /dl/httpx /dl/katana /opt/pd/bin/
+ENV PATH="/opt/pd/bin:${PATH}"
 
 COPY engine/ ./engine/
 COPY knowledge/ ./knowledge/
 
-# Concurrence bornée et éditable (défaut conservateur). Plusieurs hosts DISTINCTS en
-# parallèle ; l'admission centrale (ratelimit) garantit un seul worker par host.
-CMD ["sh", "-c", "celery -A engine.celery_app worker --loglevel=INFO --concurrency=${CELERY_CONCURRENCY:-8}"]
+# GARDE-FOU BUILD : `httpx` du PATH DOIT être le binaire ProjectDiscovery (pas le script pip).
+# Échoue le build sinon — six heures de crawl à vide deviennent une erreur immédiate (A1.2).
+RUN python -m engine.recon.binaires
+
+# Concurrence bornée et éditable. Le garde-fou binaires tourne aussi au DÉMARRAGE : le
+# worker refuse de démarrer si un binaire externe a été masqué.
+CMD ["sh", "-c", "python -m engine.recon.binaires && celery -A engine.celery_app worker --loglevel=INFO --concurrency=${CELERY_CONCURRENCY:-8}"]

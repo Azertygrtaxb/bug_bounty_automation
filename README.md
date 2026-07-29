@@ -141,3 +141,18 @@ devant un vrai signal (id +6, fingerprint +8). Raison portée explicite (`semant
 docker compose exec worker python -c "from engine.semantique_run import juger_semantique; print(juger_semantique(limite=300))"
 docker compose exec worker python -c "from engine.scoring.score import score_targets, rebuild_leads; score_targets(); rebuild_leads()"
 ```
+
+## Réglage du débit (rate-limiter)
+
+Les variables sont pilotées par `.env` (interpolées dans le service `worker` de
+`docker-compose.yml`). **Piège important** : `RL_GLOBAL_MAX_HOSTS` au-delà de
+`CELERY_CONCURRENCY` n'a **aucun effet** — le nombre de hosts crawlés en parallèle est le
+**minimum des deux** (un worker Celery = un host à la fois). Pour vraiment monter à 24 hosts
+simultanés il faut `CELERY_CONCURRENCY=24` ET `RL_GLOBAL_MAX_HOSTS=24`.
+
+Vérifier ce que le conteneur reçoit réellement :
+```bash
+docker compose config | grep -E "CELERY_CONCURRENCY|RL_"
+```
+Surcharge locale temporaire sur le VPS : `docker-compose.override.yml` (gitignoré, à
+supprimer une fois le lot déployé).

@@ -7,5 +7,7 @@
 targets.txt
 # export généré (source de vérité = table `leads`)
 leads.csv
+# surcharge locale temporaire (VPS) — à supprimer une fois le lot déployé
+docker-compose.override.yml
 __pycache__/
 *.pyc

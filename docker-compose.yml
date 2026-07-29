@@ -26,20 +26,21 @@ services:
       # URLs internes au réseau Docker (services joignables par leur nom).
       CELERY_BROKER_URL: redis://redis:6379/0
       DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
-      # --- Kit de survie du rush : concurrence + rate-limit CONSERVATEUR (éditable) ---
-      CELERY_CONCURRENCY: "8"          # workers : hosts DISTINCTS en parallèle
-      RL_GLOBAL_RPS: "5"               # cap global req/s (egress Python)
-      RL_FILIALE_RPS: "2"              # cap req/s par filiale/infra
-      RL_GLOBAL_MAX_HOSTS: "4"         # hosts distincts simultanés (global)
-      RL_FILIALE_MAX_HOSTS: "1"        # hosts simultanés par filiale (ne pas marteler)
-      RECON_RATE_LIMIT: "5"            # req/s/host des binaires recon (httpx/katana)
+      # --- Kit de survie du rush : rate-limit + concurrence. INTERPOLÉS depuis .env (A3) —
+      # avant, les valeurs étaient codées en dur : .env=24 mais le conteneur recevait 4. ---
+      CELERY_CONCURRENCY: "${CELERY_CONCURRENCY:-8}"     # workers : hosts DISTINCTS en parallèle
+      RL_GLOBAL_RPS: "${RL_GLOBAL_RPS:-5}"               # cap global req/s (egress Python)
+      RL_FILIALE_RPS: "${RL_FILIALE_RPS:-2}"             # cap req/s par filiale/infra
+      RL_GLOBAL_MAX_HOSTS: "${RL_GLOBAL_MAX_HOSTS:-4}"   # hosts distincts simultanés (global)
+      RL_FILIALE_MAX_HOSTS: "${RL_FILIALE_MAX_HOSTS:-1}" # hosts simultanés par filiale (ne pas marteler)
+      RECON_RATE_LIMIT: "${RECON_RATE_LIMIT:-5}"         # req/s/host des binaires recon (httpx/katana)
       # RECON_PROXY: "http://partenaire-proxy-rotatif:8080"  # egress IPs tournantes (recon)
-      # --- Recon TIÉRÉE (éditable) ---
+      # --- Recon TIÉRÉE (éditable via .env) ---
       ENUMERATE_SUBDOMAINS: "${ENUMERATE_SUBDOMAINS:-0}"  # 0=off (liste déjà exhaustive) ; 1=subfinder par host
-      SHALLOW_CRAWL_DEPTH: "1"         # TIER1 : profondeur de crawl shallow (0-1)
-      SEUIL_DEEP: "5"                  # TIER2 : score shallow mini pour promouvoir en deep
-      SEUIL_DEEP_SURFACE: "20"         # TIER2 : ou surface (nb URLs) mini
-      MAX_DEEP_HOSTS: "10"             # TIER2 : plafond de hosts deep-traités / fenêtre
+      SHALLOW_CRAWL_DEPTH: "${SHALLOW_CRAWL_DEPTH:-1}"   # TIER1 : profondeur de crawl shallow (0-1)
+      SEUIL_DEEP: "${SEUIL_DEEP:-5}"                     # TIER2 : score shallow mini pour promouvoir en deep
+      SEUIL_DEEP_SURFACE: "${SEUIL_DEEP_SURFACE:-20}"    # TIER2 : ou surface (nb URLs) mini
+      MAX_DEEP_HOSTS: "${MAX_DEEP_HOSTS:-10}"            # TIER2 : plafond de hosts deep-traités / fenêtre
       # Juge sémantique (S5.1) : clé UNIQUEMENT ici (le worker appelle le LLM). JAMAIS dans
       # le service board (exposé sur Internet). Le worker n'a pas d'env_file -> la déclarer ici.
       ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY:-}"

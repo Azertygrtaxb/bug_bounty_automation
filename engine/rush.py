@@ -151,37 +151,47 @@ def _attendre_agregation(res, label, n_lignes, poll=5):
     return res.get(timeout=30)
 
 
-_PATHS_CAP = 30   # échantillon de paths/registered-domain suffisant pour deep_rank (SPA/nom)
+_PATHS_CAP = 30   # échantillon de paths/host suffisant pour deep_rank (SPA/nom)
+
+
+def _ancetres_lances(host, lances):
+    """Les hosts de la LISTE LANCÉE qui sont `host` lui-même ou un de ses domaines PARENTS
+    (a.b.exemple.fr -> a.b.exemple.fr, b.exemple.fr, exemple.fr ; jamais le TLD nu)."""
+    labels = (host or "").split(".")
+    res = []
+    for i in range(len(labels) - 1):       # s'arrête avant le dernier label (pas de TLD nu)
+        cand = ".".join(labels[i:])
+        if cand in lances:
+            res.append(cand)
+    return res
 
 
 def _rank(hosts):
-    """(live triés par DEEP_RANK desc, dead). A2 : UNE seule passe streaming sur targets,
-    agrégée par registered-domain (scope.registered_domain, fiable) au lieu de 48 414
-    requêtes `host LIKE %.H` (chacune un balayage complet). Les sous-domaines se rattachent
-    par le registered-domain, pas par un LIKE. Mémoire = O(#registered-domains), pas O(#lignes)."""
-    agg = {}   # rd -> {smax, tech:set, paths:list(cap), nb}
+    """(live triés par DEEP_RANK desc, dead). A2 : SÉMANTIQUE PAR HOST restaurée SANS revenir
+    aux 48 414 requêtes. Une seule passe streaming ; chaque ligne est attribuée à TOUS ses
+    ancêtres présents dans la liste lancée (a.exemple.fr et b.exemple.fr restent DISTINCTS ;
+    exemple.fr, s'il est lancé, agrège les deux). O(lignes × labels), mémoire O(#hosts lancés)."""
+    lances = set(hosts)
+    agg = {h: {"smax": -1, "tech": set(), "paths": [], "nb": 0} for h in hosts}
     with psycopg.connect(DB) as c:
-        with c.cursor(name="rank_scan") as cur:            # curseur serveur = stream, pas de fetchall
+        with c.cursor(name="rank_scan") as cur:            # curseur serveur = stream
             cur.itersize = 5000
             cur.execute("SELECT host, score, tech, url FROM targets")
             for host, score, tech, url in cur:
-                rd = scope.registered_domain(host) or host
-                g = agg.get(rd)
-                if g is None:
-                    g = agg[rd] = {"smax": -1, "tech": set(), "paths": [], "nb": 0}
-                g["nb"] += 1
-                sc = score or 0
-                if sc > g["smax"]:
-                    g["smax"] = sc
-                for t in (tech or []):
-                    g["tech"].add(t)
-                if url and len(g["paths"]) < _PATHS_CAP:
-                    g["paths"].append(url)
+                for anc in _ancetres_lances(host, lances):
+                    g = agg[anc]
+                    g["nb"] += 1
+                    sc = score or 0
+                    if sc > g["smax"]:
+                        g["smax"] = sc
+                    for t in (tech or []):
+                        g["tech"].add(t)
+                    if url and len(g["paths"]) < _PATHS_CAP:
+                        g["paths"].append(url)
     live, dead = [], []
     for h in hosts:
-        rd = scope.registered_domain(h) or h
-        g = agg.get(rd)
-        if not g or g["nb"] == 0:
+        g = agg[h]
+        if g["nb"] == 0:
             dead.append({"host": h})
             continue
         dr, detail = config.deep_rank(g["smax"], sorted(g["tech"]), h, g["paths"])
