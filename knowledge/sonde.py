@@ -62,6 +62,23 @@ AUTH_SIMILARITE_MAX_AVEC_REFUS = 0.90  # < : contenu réellement différent -> b
 BONUS_AUTH_BYPASS = 6                  # repriorisation forte d'un bypass crédible (borné par le board)
 
 
+# --- Sonde CORS (brique B) : rejoue avec une Origin ATTAQUANTE, mesure le reflet ---------
+# Preuve EXÉCUTÉE : on n'affirme un CORS exploitable que si la réponse REFLÈTE notre Origin
+# attaquante (ACAO == Origin envoyée, ou '*') ET autorise les credentials — c.-à-d. un
+# navigateur tiers lirait la réponse authentifiée. Un ACAO fixe (allowlist) = non exploitable.
+CORS_ORIGIN_ATTAQUANT = "https://attacker.example"   # origine hors-cible, non résolue (aucun trafic vers elle)
+CORS_MAX_ENDPOINTS_PAR_HOST = 15      # borne dure : nb d'endpoints CORS sondés / host / run
+BONUS_CORS_REFLETE = 5                 # repriorisation d'un reflet Origin+creds crédible
+
+# --- Sonde OPEN-REDIRECT (brique B) : mute le param de redirection vers un domaine externe -
+# Preuve EXÉCUTÉE : on n'affirme un open redirect que si la Location du premier-hop pointe
+# réellement vers le domaine EXTERNE injecté (pas seulement le reflète dans une page).
+OPENREDIR_DOMAINE_TEMOIN = "attacker.example"   # domaine témoin (jamais joint : redirection non suivie)
+OPENREDIR_MAX_ENDPOINTS_PAR_HOST = 15  # borne dure : nb d'endpoints open-redirect sondés / host / run
+OPENREDIR_MAX_PAYLOADS = 4            # nb de variantes d'injection par endpoint
+BONUS_OPEN_REDIRECT = 4                # repriorisation d'un open redirect prouvé
+
+
 def est_content_type_asset(ct):
     """True si le content-type est un type de PRÉSENTATION (asset public).
     Insensible à la casse, ignore le charset (';'), gère les familles image/* etc."""

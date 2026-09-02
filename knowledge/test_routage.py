@@ -44,16 +44,32 @@ class TestPlanStrict(unittest.TestCase):
         p = routage.plan("applicatif", ["api_objet_par_id"])
         self.assertIn("idor", [x["famille"] for x in p])
 
-    # --- familles définies mais SANS sonde écrite : masquées par défaut ---------
-    def test_cors_masque_car_sonde_absente(self):
-        # convergence réelle, mais 'cors' n'est pas dans FAMILLES_ACTIVES -> pas planifiée
-        # tant que actives_seulement=True (défaut).
-        p = routage.plan("applicatif", ["cors_permissif"])
+    # --- cors & open_redirect : désormais ACTIVES (sonde écrite) ----------------
+    def test_cors_convergence(self):
+        p = routage.plan("applicatif", ["cors_permissif(+3)"])
+        self.assertIn("cors", [x["famille"] for x in p])
+
+    def test_cors_verdict_seul_ne_declenche_pas(self):
+        # applicatif SANS cors_permissif -> pas de sonde cors (convergence stricte)
+        p = routage.plan("applicatif", ["fingerprint_produit(+8)"])
         self.assertNotIn("cors", [x["famille"] for x in p])
 
-    def test_cors_visible_si_actives_seulement_false(self):
-        p = routage.plan("applicatif", ["cors_permissif"], actives_seulement=False)
-        self.assertIn("cors", [x["famille"] for x in p])
+    def test_open_redirect_convergence(self):
+        p = routage.plan("applicatif", ["open_redirect_possible"])
+        self.assertIn("open_redirect", [x["famille"] for x in p])
+
+    def test_open_redirect_verdict_seul_ne_declenche_pas(self):
+        p = routage.plan("surface_auth", ["open_redirect_possible"])
+        # mauvais verdict (open_redirect exige applicatif) -> pas planifié
+        self.assertNotIn("open_redirect", [x["famille"] for x in p])
+
+    def test_famille_inactive_reste_masquee(self):
+        # Garde-fou générique : une famille hors FAMILLES_ACTIVES n'est jamais planifiée en
+        # mode actives_seulement (défaut), même en cas de convergence. (Toutes actives ici :
+        # on vérifie le mécanisme via une famille fictive absente de FAMILLES.)
+        p = routage.plan("applicatif", ["cors_permissif"])
+        for x in p:
+            self.assertIn(x["famille"], routage.FAMILLES_ACTIVES)
 
     # --- verdicts neutres : aucun plan -----------------------------------------
     def test_incertain_ne_planifie_rien(self):

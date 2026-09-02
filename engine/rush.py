@@ -345,6 +345,12 @@ def main(argv):
             ab = [(h, app.send_task("probe_auth_bypass", args=[h])) for h in deep]
             _wait_all(ab, "TIER2 sonde auth-bypass", phase="sonde_auth",
                       continuer_si_incomplet=continuer)
+            co = [(h, app.send_task("probe_cors", args=[h])) for h in deep]
+            _wait_all(co, "TIER2 sonde cors", phase="sonde_cors",
+                      continuer_si_incomplet=continuer)
+            orr = [(h, app.send_task("probe_open_redirect", args=[h])) for h in deep]
+            _wait_all(orr, "TIER2 sonde open-redirect", phase="sonde_openredir",
+                      continuer_si_incomplet=continuer)
     except Exception as e:
         sys.stderr.write("\n[rush] ÉCHEC : %s\n-> RELANCE la MÊME commande avec --reprendre : "
                          "les hosts déjà traités seront sautés (le tier 1 ne sera PAS refait).\n" % e)

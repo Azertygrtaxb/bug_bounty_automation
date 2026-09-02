@@ -23,7 +23,7 @@ import psycopg
 from engine import ratelimit
 from engine.celery_app import app
 from engine.gate import gate
-from knowledge import sonde
+from knowledge import sonde, substance
 
 log = logging.getLogger(__name__)
 DATABASE_URL = os.environ["DATABASE_URL"]
@@ -139,20 +139,21 @@ def _get(url, host_lancement):
         return None, "", None
 
 
-def _requete_mutee(url, host_lancement, methode="GET", entetes=None):
-    """Comme _get mais autorise une MÉTHODE et des EN-TÊTES de mutation (sonde auth-bypass).
-    SANS EFFET DE BORD : méthode bornée à GET/HEAD (sonde.METHODES_AUTORISEES) — jamais
-    POST/PUT/DELETE. Même confinement dur + throttle + instrumentation que _get.
-    Renvoie (status, corps_texte, content_type)."""
+def _requete_mutee_full(url, host_lancement, methode="GET", entetes=None):
+    """Requête de sonde COMMUNE aux sondes actives (auth-bypass, cors, open-redirect).
+    SANS EFFET DE BORD : méthode bornée à GET/HEAD (jamais POST/PUT/DELETE). Même confinement
+    dur + throttle + instrumentation que _get. Renvoie (status, corps_texte, headers_dict) —
+    headers_dict permet aux sondes de lire ACAO / Location. Les redirections ne sont pas
+    suivies (_SansRedirection) : un 3xx est observé tel quel (pas de sortie de cible)."""
     if methode not in sonde.METHODES_AUTORISEES:
-        return None, "", None            # garde-fou dur : aucune méthode à effet de bord
+        return None, "", {}              # garde-fou dur : aucune méthode à effet de bord
     try:
         gate.confiner(host_lancement, url)
     except gate.HorsCibleError:
-        return None, "", None            # refus dur : requête bloquée (loggée par le gate)
+        return None, "", {}              # refus dur : requête bloquée (loggée par le gate)
     cible = urlsplit(url).hostname or host_lancement
     ratelimit.throttle_egress(cible)
-    h = {"User-Agent": "bb-recon-probe/1.0 (read-only, auth-bypass)"}
+    h = {"User-Agent": "bb-recon-probe/1.0 (read-only)"}
     h.update(entetes or {})
     req = urllib.request.Request(url, method=methode, headers=h)
     t0 = time.time()
@@ -166,22 +167,31 @@ def _requete_mutee(url, host_lancement, methode="GET", entetes=None):
         if ratelimit.est_reponse_waf(status, url):
             ratelimit.record_waf(cible, status, url)
 
+    def _entetes(resp_headers):
+        return {k.lower(): v for k, v in resp_headers.items()} if resp_headers else {}
+
     try:
         with _OPENER.open(req, timeout=sonde.TIMEOUT_REQUETE) as resp:
             body = resp.read(sonde.MAX_CORPS_OCTETS).decode("utf-8", "replace")
-            ct = resp.headers.get_content_type() if resp.headers else None
             _instr(resp.status, body)
-            return resp.status, body, ct
+            return resp.status, body, _entetes(resp.headers)
     except urllib.error.HTTPError as e:
         try:
             body = e.read(sonde.MAX_CORPS_OCTETS).decode("utf-8", "replace")
         except Exception:
             body = ""
         _instr(e.code, body)
-        return e.code, body, (e.headers.get_content_type() if e.headers else None)
+        return e.code, body, _entetes(e.headers)
     except Exception as e:
-        log.warning("sonde auth-bypass: echec %s %s : %s", methode, url, e)
-        return None, "", None
+        log.warning("sonde: echec %s %s : %s", methode, url, e)
+        return None, "", {}
+
+
+def _requete_mutee(url, host_lancement, methode="GET", entetes=None):
+    """Compat auth-bypass : (status, corps, content_type). Enveloppe _requete_mutee_full."""
+    st, body, headers = _requete_mutee_full(url, host_lancement, methode, entetes)
+    ct = (headers.get("content-type") or "").split(";")[0] or None
+    return st, body, ct
 
 
 def _mutations_bypass(url):
@@ -499,3 +509,148 @@ def probe_auth_bypass(host):
         "budget_max": sonde.MAX_REQUETES_PAR_HOST,
         "resultats": resultats,
     }
+
+
+def _endpoints_planifies(host, famille, statuts=None, limite=None):
+    """Sélection COMMUNE aux sondes de plan : endpoints dont sonde_plan contient `famille`,
+    sur le host de lancement (ou sous-domaine), triés par score. `statuts` filtre le http_status
+    si fourni. Confinement host garanti par la clause SQL + gate.confiner à l'émission."""
+    with psycopg.connect(DATABASE_URL) as conn:
+        with conn.cursor() as cur:
+            if statuts:
+                cur.execute(
+                    "SELECT id, url, http_status, sonde_plan FROM targets "
+                    "WHERE sonde_plan IS NOT NULL AND http_status = ANY(%s) "
+                    "AND (host = %s OR host LIKE %s) ORDER BY score DESC",
+                    (list(statuts), host, "%." + host))
+            else:
+                cur.execute(
+                    "SELECT id, url, http_status, sonde_plan FROM targets "
+                    "WHERE sonde_plan IS NOT NULL "
+                    "AND (host = %s OR host LIKE %s) ORDER BY score DESC",
+                    (host, "%." + host))
+            rows = cur.fetchall()
+    sel = [(rid, url, st) for rid, url, st, plan in rows if _plan_contient(plan, famille)]
+    return sel[:limite] if limite else sel
+
+
+@app.task(name="probe_cors")
+def probe_cors(host):
+    """Sonde CORS (brique B), CONFINÉE au host de lancement.
+
+    Ne sonde que les endpoints planifiés 'cors' (applicatif + cors_permissif), sur le host de
+    lancement. Rejoue chaque endpoint avec une Origin ATTAQUANTE et lit la réponse : preuve
+    EXÉCUTÉE d'un CORS exploitable = ACAO REFLÈTE notre origine (== origine envoyée, ou '*')
+    ET Allow-Credentials:true — un navigateur tiers lirait alors la réponse authentifiée. Un
+    ACAO fixe (allowlist) n'est PAS un reflet -> non exploitable. Ne conclut jamais
+    'vulnérable' : ajuste le score + observation traçable. Preuve finale humaine."""
+    a_sonder = _endpoints_planifies(host, "cors",
+                                    limite=sonde.CORS_MAX_ENDPOINTS_PAR_HOST)
+    budget = {"restant": sonde.MAX_REQUETES_PAR_HOST}
+    resultats = []
+    for rid, url, _ in a_sonder:
+        if budget["restant"] <= 0:
+            log.warning("sonde cors: budget epuise, arret (ROE)")
+            break
+        st, _body, headers = _requete_mutee_full(
+            url, host, "GET", {"Origin": sonde.CORS_ORIGIN_ATTAQUANT})
+        budget["restant"] -= 1
+        time.sleep(sonde.DELAI_ENTRE_REQUETES)
+        if st is None:
+            continue
+        acao = (headers.get("access-control-allow-origin") or "").strip()
+        creds = (headers.get("access-control-allow-credentials") or "").strip().lower() == "true"
+        reflete = (acao == sonde.CORS_ORIGIN_ATTAQUANT) or (acao == "*")
+        if reflete and creds:
+            texte = ("sonde cors: Origin attaquante REFLETEE (ACAO=%s, creds=true) "
+                     "-> lecture cross-origin authentifiee CREDIBLE (preuve executee, "
+                     "verif humaine requise)" % (acao or "*"))
+            _appliquer({"delta": sonde.BONUS_CORS_REFLETE, "texte": texte}, [{"row_id": rid}])
+            resultats.append({"row_id": rid, "url": url, "acao": acao, "creds": creds})
+        else:
+            _appliquer({"delta": 0,
+                        "texte": "sonde cors: ACAO=%r creds=%s -> pas de reflet exploitable"
+                                 % (acao or None, creds)}, [{"row_id": rid}])
+
+    return {"host": host, "endpoints_planifies": len(a_sonder),
+            "reflets_credibles": len(resultats),
+            "requetes_utilisees": sonde.MAX_REQUETES_PAR_HOST - budget["restant"],
+            "resultats": resultats}
+
+
+def _payloads_open_redirect(domaine):
+    """Variantes d'injection open-redirect (LECTURE SEULE), bornées. Générique, sans valeur
+    host-spécifique. On teste des formes couramment mal filtrées pointant un domaine EXTERNE."""
+    return [
+        "https://%s" % domaine,
+        "//%s" % domaine,
+        "https:/%s" % domaine,
+        "https://%s/%%2f.." % domaine,
+    ][:sonde.OPENREDIR_MAX_PAYLOADS]
+
+
+def _muter_param_redirect(url, payload):
+    """Remplace la valeur des paramètres de redirection connus par `payload`. Renvoie l'URL
+    mutée, ou None si l'URL n'a aucun paramètre de redirection (rien à tester)."""
+    from urllib.parse import urlencode, parse_qsl, urlunsplit
+    parts = urlsplit(url)
+    pairs = parse_qsl(parts.query, keep_blank_values=True)
+    touche = False
+    nouveaux = []
+    for k, v in pairs:
+        if k.lower() in substance.REDIRECT_PARAMS:
+            nouveaux.append((k, payload))
+            touche = True
+        else:
+            nouveaux.append((k, v))
+    if not touche:
+        return None
+    return urlunsplit((parts.scheme, parts.netloc, parts.path,
+                       urlencode(nouveaux), parts.fragment))
+
+
+@app.task(name="probe_open_redirect")
+def probe_open_redirect(host):
+    """Sonde OPEN-REDIRECT (brique B), CONFINÉE au host de lancement.
+
+    Ne sonde que les endpoints planifiés 'open_redirect' (applicatif + open_redirect_possible),
+    sur le host de lancement. Mute le paramètre de redirection vers un domaine EXTERNE témoin
+    et lit la Location du premier-hop (redirection NON suivie). Preuve EXÉCUTÉE = la Location
+    pointe réellement le domaine externe injecté (pas seulement le reflète dans une page).
+    Ne conclut jamais 'vulnérable' : ajuste le score + observation. Preuve finale humaine."""
+    a_sonder = _endpoints_planifies(host, "open_redirect",
+                                    limite=sonde.OPENREDIR_MAX_ENDPOINTS_PAR_HOST)
+    budget = {"restant": sonde.MAX_REQUETES_PAR_HOST}
+    resultats = []
+    for rid, url, _ in a_sonder:
+        confirme = None
+        for payload in _payloads_open_redirect(sonde.OPENREDIR_DOMAINE_TEMOIN):
+            if budget["restant"] <= 0:
+                break
+            url_mut = _muter_param_redirect(url, payload)
+            if url_mut is None:
+                break  # aucun param de redirection dans cette URL -> rien à tester
+            st, _body, headers = _requete_mutee_full(url_mut, host, "GET")
+            budget["restant"] -= 1
+            time.sleep(sonde.DELAI_ENTRE_REQUETES)
+            loc = (headers.get("location") or "")
+            # Preuve : redirection (3xx) dont la destination est le domaine externe témoin.
+            if st is not None and 300 <= st < 400 and loc:
+                dest_host = (urlsplit(loc).hostname or "").lower()
+                if dest_host == sonde.OPENREDIR_DOMAINE_TEMOIN:
+                    confirme = {"payload": payload, "status": st, "location": loc[:200]}
+                    break
+        if confirme:
+            texte = ("sonde open-redirect: param redirige vers domaine EXTERNE temoin "
+                     "(%d -> %s) via %r -> OPEN REDIRECT PROUVE (preuve executee, verif "
+                     "humaine requise)" % (confirme["status"], confirme["location"],
+                                           confirme["payload"]))
+            _appliquer({"delta": sonde.BONUS_OPEN_REDIRECT, "texte": texte}, [{"row_id": rid}])
+            resultats.append({"row_id": rid, "url": url, **confirme})
+        elif budget["restant"] <= 0:
+            break
+
+    return {"host": host, "endpoints_planifies": len(a_sonder),
+            "open_redirects_prouves": len(resultats),
+            "requetes_utilisees": sonde.MAX_REQUETES_PAR_HOST - budget["restant"],
+            "resultats": resultats}

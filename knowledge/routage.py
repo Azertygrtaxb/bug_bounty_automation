@@ -37,8 +37,9 @@ FAMILLES = {
 }
 
 # Familles dont la tâche probe_* existe RÉELLEMENT (les seules qu'on ose planifier pour de
-# vrai tant que les autres sondes ne sont pas écrites). Élargir en ajoutant la tâche + le nom.
-FAMILLES_ACTIVES = {"idor", "auth_bypass"}
+# vrai). Élargir en ajoutant la tâche + le nom. Toutes actives : idor (probe_idor_candidates),
+# auth_bypass (probe_auth_bypass), cors (probe_cors), open_redirect (probe_open_redirect).
+FAMILLES_ACTIVES = {"idor", "auth_bypass", "cors", "open_redirect"}
 
 
 def _present(token, raisons):
