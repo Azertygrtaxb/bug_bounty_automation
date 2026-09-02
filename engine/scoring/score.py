@@ -13,7 +13,7 @@ from psycopg.types.json import Json
 
 from engine.celery_app import app
 from engine.gate import gate
-from knowledge import semantique, signaux, substance
+from knowledge import routage, semantique, signaux, substance
 
 DATABASE_URL = os.environ["DATABASE_URL"]
 
@@ -86,13 +86,19 @@ def score_targets():
                     score, rk = semantique.composer_priorite(score, sem_verdict)
                     if rk:
                         raisons = list(raisons) + [rk]
+                # Brique B : PLAN de sondes ciblées (routage pur). Calculé APRÈS le repêchage
+                # sémantique -> il voit le verdict ET les raisons déterministes finales.
+                # convergence stricte : une famille n'est planifiée que si les deux convergent.
+                # Vide si pas de verdict (sem non lancée) ou pas de convergence.
+                plan = routage.plan(sem_verdict, raisons) if sem_verdict else []
                 new_tags = {**(tags or {}),
                             "methode": "GET",
                             "scannable": gate.is_scannable(target)}
                 cur.execute(
                     "UPDATE targets SET score = %s, score_raisons = %s::text[], "
-                    "tags = %s::jsonb WHERE id = %s",
-                    (score, raisons, Json(new_tags), tid),
+                    "tags = %s::jsonb, sonde_plan = %s WHERE id = %s",
+                    (score, raisons, Json(new_tags),
+                     Json(plan) if plan else None, tid),
                 )
                 scored += 1
         conn.commit()

@@ -337,6 +337,14 @@ def main(argv):
 
         pr = [(h, app.send_task("probe_idor_candidates", args=[h])) for h in deep]
         _wait_all(pr, "TIER2 sonde", phase="sonde", continuer_si_incomplet=continuer)
+
+        # --- Sondes CIBLÉES par le plan sémantique (brique B) : n'ont de sens que si le juge
+        # a tourné (sonde_plan rempli par le score post-sémantique). Confinées au host, budget
+        # borné, lecture seule. Même flag --avec-semantique : sans verdict, aucun plan -> no-op. ---
+        if avec_semantique:
+            ab = [(h, app.send_task("probe_auth_bypass", args=[h])) for h in deep]
+            _wait_all(ab, "TIER2 sonde auth-bypass", phase="sonde_auth",
+                      continuer_si_incomplet=continuer)
     except Exception as e:
         sys.stderr.write("\n[rush] ÉCHEC : %s\n-> RELANCE la MÊME commande avec --reprendre : "
                          "les hosts déjà traités seront sautés (le tier 1 ne sera PAS refait).\n" % e)

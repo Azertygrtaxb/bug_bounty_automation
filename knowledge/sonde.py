@@ -49,6 +49,19 @@ MALUS_ASSET_PUBLIC = -4              # dépriorisation d'un endpoint d'asset (bo
 SEUIL_SONDE = 3
 
 
+# --- Sonde AUTH-BYPASS (brique B) : bornes DURES + seuils de décision ----------
+# Rejoue un endpoint 401/403 avec des mutations d'accès et compare au baseline. Preuve
+# EXÉCUTÉE uniquement : on n'affirme un contournement que sur un 401/403 -> 200 dont le
+# CONTENU diffère réellement du refus (un 200 identique au corps de refus = faux positif).
+AUTH_STATUTS_CIBLES = {401, 403}       # seuls statuts sur lesquels un bypass a un sens
+AUTH_MAX_MUTATIONS_PAR_ENDPOINT = 8   # borne dure : nb de tentatives de bypass / endpoint
+AUTH_MAX_ENDPOINTS_PAR_HOST = 12      # borne dure : nb d'endpoints sondés / host / run
+# Un 200 obtenu APRÈS mutation ne compte comme bypass que si son corps s'écarte assez du
+# corps de refus baseline (sinon c'est la même page de refus renvoyée en 200 -> faux positif).
+AUTH_SIMILARITE_MAX_AVEC_REFUS = 0.90  # < : contenu réellement différent -> bypass crédible
+BONUS_AUTH_BYPASS = 6                  # repriorisation forte d'un bypass crédible (borné par le board)
+
+
 def est_content_type_asset(ct):
     """True si le content-type est un type de PRÉSENTATION (asset public).
     Insensible à la casse, ignore le charset (';'), gère les familles image/* etc."""

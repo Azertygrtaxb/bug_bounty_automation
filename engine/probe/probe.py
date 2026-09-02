@@ -139,6 +139,75 @@ def _get(url, host_lancement):
         return None, "", None
 
 
+def _requete_mutee(url, host_lancement, methode="GET", entetes=None):
+    """Comme _get mais autorise une MÉTHODE et des EN-TÊTES de mutation (sonde auth-bypass).
+    SANS EFFET DE BORD : méthode bornée à GET/HEAD (sonde.METHODES_AUTORISEES) — jamais
+    POST/PUT/DELETE. Même confinement dur + throttle + instrumentation que _get.
+    Renvoie (status, corps_texte, content_type)."""
+    if methode not in sonde.METHODES_AUTORISEES:
+        return None, "", None            # garde-fou dur : aucune méthode à effet de bord
+    try:
+        gate.confiner(host_lancement, url)
+    except gate.HorsCibleError:
+        return None, "", None            # refus dur : requête bloquée (loggée par le gate)
+    cible = urlsplit(url).hostname or host_lancement
+    ratelimit.throttle_egress(cible)
+    h = {"User-Agent": "bb-recon-probe/1.0 (read-only, auth-bypass)"}
+    h.update(entetes or {})
+    req = urllib.request.Request(url, method=methode, headers=h)
+    t0 = time.time()
+
+    def _instr(status, body):
+        ratelimit.record_request(cible)
+        ratelimit.record_latency((time.time() - t0) * 1000.0)
+        sig = ratelimit.est_signal_debit(status, body)
+        if sig:
+            ratelimit.signal_debit_et_evaluer(sig)
+        if ratelimit.est_reponse_waf(status, url):
+            ratelimit.record_waf(cible, status, url)
+
+    try:
+        with _OPENER.open(req, timeout=sonde.TIMEOUT_REQUETE) as resp:
+            body = resp.read(sonde.MAX_CORPS_OCTETS).decode("utf-8", "replace")
+            ct = resp.headers.get_content_type() if resp.headers else None
+            _instr(resp.status, body)
+            return resp.status, body, ct
+    except urllib.error.HTTPError as e:
+        try:
+            body = e.read(sonde.MAX_CORPS_OCTETS).decode("utf-8", "replace")
+        except Exception:
+            body = ""
+        _instr(e.code, body)
+        return e.code, body, (e.headers.get_content_type() if e.headers else None)
+    except Exception as e:
+        log.warning("sonde auth-bypass: echec %s %s : %s", methode, url, e)
+        return None, "", None
+
+
+def _mutations_bypass(url):
+    """Matrice de contournement 401/403, EN LECTURE SEULE. Chaque entrée = (label, méthode,
+    entêtes, url_mutée). Bornée par sonde.AUTH_MAX_MUTATIONS_PAR_ENDPOINT. Générique (aucune
+    valeur host-spécifique). Ne modifie jamais le corps ni n'émet de méthode à effet de bord."""
+    parts = urlsplit(url)
+    base = "%s://%s" % (parts.scheme, parts.netloc)
+    path = parts.path or "/"
+    q = ("?" + parts.query) if parts.query else ""
+    muts = [
+        # En-têtes de confiance / réécriture d'URL couramment mal validés en périphérie.
+        ("xff-127",         "GET",  {"X-Forwarded-For": "127.0.0.1"},          url),
+        ("x-original-url",  "GET",  {"X-Original-URL": path},                   base + "/" + q),
+        ("x-rewrite-url",   "GET",  {"X-Rewrite-URL": path},                    base + "/" + q),
+        ("x-forwarded-host","GET",  {"X-Forwarded-Host": "localhost"},         url),
+        # Mutations de chemin : traversée de séparateur souvent traitée après l'ACL.
+        ("path-semicolon",  "GET",  {},  base + path + "..;/" + q),
+        ("path-trailing",   "GET",  {},  base + path + "/" + q if not path.endswith("/") else url),
+        ("path-dotslash",   "GET",  {},  base + path + "/." + q),
+        # Méthode alternative sans effet de bord (certaines ACL ne couvrent que GET).
+        ("head",            "HEAD", {},  url),
+    ]
+    return muts[:sonde.AUTH_MAX_MUTATIONS_PAR_ENDPOINT]
+
+
 def _similarite(bodies):
     """Similarité moyenne (difflib ratio 0..1) entre paires de corps, fenêtrée."""
     w = sonde.FENETRE_COMPARAISON
@@ -343,4 +412,90 @@ def probe_idor_candidates(host):
         "budget_max": sonde.MAX_REQUETES_PAR_HOST,
         "hors_cible_marques": hors_cible,
         "verdicts": verdicts,
+    }
+
+
+def _plan_contient(sonde_plan, famille):
+    """True si le sonde_plan JSONB (list[dict]) contient la famille demandée."""
+    if not isinstance(sonde_plan, list):
+        return False
+    return any(isinstance(e, dict) and e.get("famille") == famille for e in sonde_plan)
+
+
+@app.task(name="probe_auth_bypass")
+def probe_auth_bypass(host):
+    """Sonde AUTH-BYPASS (brique B), CONFINÉE au host de lancement.
+
+    Ne sonde QUE les endpoints dont sonde_plan contient 'auth_bypass' (routage à convergence
+    stricte : verdict sémantique surface_auth + signal déterministe d'auth), vivants en
+    401/403, situés sur le host de lancement (ou un sous-domaine). Pour chacun : baseline
+    (le refus), puis matrice de mutations EN LECTURE SEULE. N'affirme un contournement que
+    sur un 401/403 -> 200 dont le CONTENU s'écarte réellement du refus (preuve EXÉCUTÉE ;
+    un 200 identique au refus est un faux positif écarté). Ne conclut jamais 'vulnérable' :
+    ajuste le score + écrit une observation traçable. La preuve finale reste humaine."""
+    with psycopg.connect(DATABASE_URL) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT id, url, http_status, sonde_plan
+                FROM targets
+                WHERE sonde_plan IS NOT NULL
+                  AND http_status = ANY(%s)
+                  AND (host = %s OR host LIKE %s)
+                ORDER BY score DESC
+                """,
+                (list(sonde.AUTH_STATUTS_CIBLES), host, "%." + host),
+            )
+            rows = cur.fetchall()
+
+    a_sonder = [(rid, url, st) for rid, url, st, plan in rows
+                if _plan_contient(plan, "auth_bypass")][:sonde.AUTH_MAX_ENDPOINTS_PAR_HOST]
+
+    budget = {"restant": sonde.MAX_REQUETES_PAR_HOST}
+    resultats = []
+    for rid, url, statut_baseline in a_sonder:
+        if budget["restant"] <= 1:
+            log.warning("sonde auth-bypass: budget epuise, arret (ROE)")
+            break
+        # Baseline : le refus tel qu'il est (confirme le statut + capture le corps de refus).
+        st0, refus, _ = _requete_mutee(url, host, "GET")
+        budget["restant"] -= 1
+        time.sleep(sonde.DELAI_ENTRE_REQUETES)
+        if st0 not in sonde.AUTH_STATUTS_CIBLES:
+            continue  # plus en 401/403 (changé depuis le scan) -> rien à contourner
+
+        bypass = None
+        for label, methode, entetes, url_mut in _mutations_bypass(url):
+            if budget["restant"] <= 0:
+                break
+            st, body, _ = _requete_mutee(url_mut, host, methode, entetes)
+            budget["restant"] -= 1
+            time.sleep(sonde.DELAI_ENTRE_REQUETES)
+            # PREUVE EXÉCUTÉE : 200 obtenu ET contenu réellement différent du refus baseline.
+            if st == 200 and body:
+                sim = round(_similarite([refus, body]), 3)
+                if sim < sonde.AUTH_SIMILARITE_MAX_AVEC_REFUS:
+                    bypass = {"label": label, "methode": methode, "sim_refus": sim}
+                    break  # un contournement crédible suffit : on n'insiste pas (ROE)
+
+        if bypass:
+            texte = ("sonde auth-bypass: %d->200 via '%s' (%s), contenu != refus (sim=%s) "
+                     "-> CONTOURNEMENT CREDIBLE (preuve executee, verif humaine requise)"
+                     % (statut_baseline, bypass["label"], bypass["methode"], bypass["sim_refus"]))
+            _appliquer({"delta": sonde.BONUS_AUTH_BYPASS, "texte": texte}, [{"row_id": rid}])
+            resultats.append({"row_id": rid, "url": url, **bypass})
+        else:
+            _appliquer({"delta": 0,
+                        "texte": "sonde auth-bypass: %d, aucune mutation ne contourne (%d essais) "
+                                 "-> pas de bypass" % (statut_baseline,
+                                                       len(_mutations_bypass(url)))},
+                       [{"row_id": rid}])
+
+    return {
+        "host": host,
+        "endpoints_planifies": len(a_sonder),
+        "bypass_credibles": len(resultats),
+        "requetes_utilisees": sonde.MAX_REQUETES_PAR_HOST - budget["restant"],
+        "budget_max": sonde.MAX_REQUETES_PAR_HOST,
+        "resultats": resultats,
     }
