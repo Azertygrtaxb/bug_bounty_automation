@@ -149,6 +149,9 @@ MAX_APPELS_JUGE_PAR_RUN = int(os.environ.get("MAX_APPELS_JUGE_PAR_RUN", "300")) 
 BONUS_APPLICATIF = int(os.environ.get("BONUS_APPLICATIF", "3"))
 BONUS_SURFACE_AUTH = int(os.environ.get("BONUS_SURFACE_AUTH", "2"))
 PLAFOND_SEM = int(os.environ.get("PLAFOND_SEM", "5"))              # garde-fou dur : plafond après bonus sémantique
+# Attente du batch LLM dans rush : NON dérivée du parc (le batch dure indépendamment du
+# nombre de lignes). Plafond dur pour ne pas bloquer un rush indéfiniment sur l'API.
+TIMEOUT_JUGE_SEM = int(os.environ.get("TIMEOUT_JUGE_SEM", "3600"))  # 1h : couvre un batch Anthropic lent
 
 # --- Anti-bruteforce du login board : au-delà de BOARD_MAX_ECHECS tentatives ratées par
 # (compte, IP) dans BOARD_FENETRE_ECHECS secondes -> 429, sans comparer le mot de passe.

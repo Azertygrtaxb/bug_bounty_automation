@@ -68,6 +68,14 @@ SYSTEME_JUGE = (
 )
 
 
+def _supporte_effort(modele):
+    """output_config.effort est GA sur Opus 4.5+, Sonnet 5 et la famille 4.6+, mais l'API
+    le REJETTE (400) sur Sonnet 4.5 / Haiku 4.5. On liste donc les modèles SANS effort ;
+    tout le reste (Sonnet 5, Opus, futurs) l'accepte."""
+    m = (modele or "").lower()
+    return not (m.startswith("claude-haiku-4-5") or m.startswith("claude-sonnet-4-5"))
+
+
 def _content_type(response_headers):
     h = response_headers or {}
     for k, v in h.items():
@@ -160,14 +168,20 @@ def juger_semantique(limite=None, modele=None):
             client = Anthropic()
 
             requests = []
+            # `effort` n'existe PAS sur Haiku 4.5 (l'API rejette output_config.effort en 400) :
+            # on ne le pose que pour les modèles qui le supportent. Le format json_schema, lui,
+            # est toujours présent (structured outputs GA sur tous les modèles courants).
+            output_config = {"format": {"type": "json_schema", "schema": SCHEMA_FAITS}}
+            if _supporte_effort(modele):
+                output_config["effort"] = config.EFFORT_JUGE
+
             for c in a_juger:
                 params = MessageCreateParamsNonStreaming(
                     model=modele,
                     max_tokens=2048,   # couvre raisonnement adaptatif + JSON ; 512 tronquerait
                     system=[{"type": "text", "text": SYSTEME_JUGE,
                              "cache_control": {"type": "ephemeral"}}],
-                    output_config={"effort": config.EFFORT_JUGE,
-                                   "format": {"type": "json_schema", "schema": SCHEMA_FAITS}},
+                    output_config=output_config,
                     messages=[{"role": "user", "content": extrait_aveugle(c["body"], c["headers"])}],
                 )
                 requests.append(Request(custom_id=str(c["id"]), params=params))

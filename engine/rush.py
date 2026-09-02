@@ -151,6 +151,29 @@ def _attendre_agregation(res, label, n_lignes, poll=5):
     return res.get(timeout=30)
 
 
+def _attendre_juge_sem(res, label="juger_semantique"):
+    """Attente du batch LLM : timeout FIXE (config.TIMEOUT_JUGE_SEM), pas dérivé du parc —
+    le batch Anthropic dure indépendamment du nombre de lignes. À l'expiration, message
+    explicite. Le résumé de la tâche (juges/exclus/erreurs) est renvoyé pour affichage."""
+    timeout = config.TIMEOUT_JUGE_SEM
+    print("[%s] batch LLM aveugle | timeout fixe %s (indépendant du parc)"
+          % (label, _fmt_duree(timeout)))
+    t0 = time.time()
+    prochain = config.PROGRESS_SECS
+    while not res.ready():
+        ecoule = time.time() - t0
+        if ecoule >= prochain:
+            prochain += config.PROGRESS_SECS
+            print("[%s] batch en cours depuis %s… (timeout %s)"
+                  % (label, _fmt_duree(ecoule), _fmt_duree(timeout)))
+        if ecoule >= timeout:
+            raise RuntimeError("[%s] TIMEOUT %s : le batch LLM n'a pas fini. Augmente "
+                               "TIMEOUT_JUGE_SEM ou relance sans --avec-semantique."
+                               % (label, _fmt_duree(timeout)))
+        time.sleep(5)
+    return res.get(timeout=30)
+
+
 _PATHS_CAP = 30   # échantillon de paths/host suffisant pour deep_rank (SPA/nom)
 
 
@@ -234,11 +257,16 @@ def main(argv):
     # A4 : --reprendre saute les hosts déjà traités (le tier 1 n'est pas refait).
     continuer = "--continuer-si-incomplet" in argv
     reprendre = "--reprendre" in argv
-    argv = [a for a in argv if a not in ("--continuer-si-incomplet", "--reprendre")]
+    # OPT-IN : le juge sémantique est le SEUL étage qui appelle un LLM (coûte de l'argent
+    # + un tiers). Il ne part JAMAIS par défaut. Placé AVANT le rang -> son repêchage décide
+    # aussi de la promotion DEEP (brique B : le scan précis cible les cibles repêchées).
+    avec_semantique = "--avec-semantique" in argv
+    argv = [a for a in argv
+            if a not in ("--continuer-si-incomplet", "--reprendre", "--avec-semantique")]
     hosts = _hosts_from_argv(argv)
     if not hosts:
         print("usage: python engine/rush.py host1 ... | --file hosts.txt "
-              "[--reprendre] [--continuer-si-incomplet]")
+              "[--reprendre] [--continuer-si-incomplet] [--avec-semantique]")
         return 1
 
     roots = scope.deriver_roots(hosts)
@@ -261,6 +289,23 @@ def main(argv):
         # --- Agrégation (timeouts A1 dérivés du parc) ---
         n_lignes = _compter_targets()
         _attendre_agregation(app.send_task("score_targets"), "score_targets", n_lignes)
+
+        # --- Juge sémantique (OPT-IN) : REPÊCHE le résidu shallow AVANT le rang, pour que le
+        # verdict pèse sur la promotion DEEP. Ordre : score (fait) -> juge -> RE-score (le
+        # verdict entre dans le score via composer_priorite) -> rebuild_leads. Sans le flag,
+        # le rush est strictement inchangé. Une erreur du juge (clé absente, batch KO) ne doit
+        # pas faire échouer le rush -> on la signale et on continue en déterministe pur. ---
+        if avec_semantique:
+            print("\n--- SÉMANTIQUE (opt-in) : repêchage LLM aveugle du résidu ---")
+            resume = _attendre_juge_sem(app.send_task("juger_semantique"))
+            print("[juger_semantique] %s" % resume)
+            if isinstance(resume, dict) and resume.get("erreur"):
+                sys.stderr.write("[rush] juge sémantique NON appliqué : %s\n"
+                                 "-> le rush continue en déterministe pur.\n" % resume["erreur"])
+            else:
+                # RE-score : sans cette 2e passe, semantique_verdict resterait ignoré du score.
+                _attendre_agregation(app.send_task("score_targets"), "score_targets (post-sem)", n_lignes)
+
         _attendre_agregation(app.send_task("rebuild_leads"), "rebuild_leads", n_lignes)
 
         # --- Classement (A2 : une requête) + promotion DEEP ---
