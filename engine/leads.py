@@ -225,6 +225,10 @@ def _assurer_table(cur):
         " tech TEXT[], in_scope BOOLEAN, premiere_vue TIMESTAMPTZ,"
         " updated_at TIMESTAMPTZ DEFAULT now(), PRIMARY KEY (host, pattern))")
     cur.execute("ALTER TABLE leads ADD COLUMN IF NOT EXISTS premiere_vue TIMESTAMPTZ")
+    # Verdict sémantique du représentant du lead (l'endpoint au score max du groupe) : colonne
+    # DÉDIÉE (en plus de sa présence dans `raisons`) pour que le dashboard puisse l'afficher
+    # comme badge / le filtrer sans parser le texte des raisons. NULL = pas encore jugé.
+    cur.execute("ALTER TABLE leads ADD COLUMN IF NOT EXISTS semantique_verdict TEXT")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_leads_score ON leads (score DESC)")
     cur.execute(
         "CREATE TABLE IF NOT EXISTS leads_statut ("
@@ -246,7 +250,8 @@ def construire(seuil=1):
     with psycopg.connect(DATABASE_URL) as conn:
         with conn.cursor() as cur:
             cur.execute("SELECT id, host, url, score, COALESCE(score_raisons,'{}'), "
-                        "http_status, COALESCE(tech,'{}'), COALESCE(tags,'{}'), cree_le "
+                        "http_status, COALESCE(tech,'{}'), COALESCE(tags,'{}'), cree_le, "
+                        "semantique_verdict "
                         "FROM targets WHERE score >= %s", (seuil,))
             rows = cur.fetchall()
 
@@ -255,7 +260,8 @@ def construire(seuil=1):
             # liste lancée (OU marque hors_cible si présente). Scope vide -> fail-open.
             roots = scope.charger_roots()
             gardes, exclus_hc = [], 0
-            for rid, host, url, score, raisons, http_status, tech, tags, cree_le in rows:
+            for (rid, host, url, score, raisons, http_status, tech, tags, cree_le,
+                 sem_verdict) in rows:
                 marque = "hors_cible_de_lancement" in ",".join(raisons)
                 dehors = scope.hors_scope(host, roots) or marque
                 if not config.INCLURE_HORS_SCOPE and dehors:
@@ -264,7 +270,8 @@ def construire(seuil=1):
                 gardes.append({"id": rid, "host": host, "url": url, "score": score,
                                "raisons": list(raisons or []), "http_status": http_status,
                                "tech": list(tech or []), "tags": tags,
-                               "in_scope": not dehors, "cree_le": cree_le})
+                               "in_scope": not dehors, "cree_le": cree_le,
+                               "semantique_verdict": sem_verdict})
             apres_1b = len(gardes)
 
             # 1c — patternize + stockage tags.lead_pattern
@@ -303,7 +310,8 @@ def construire(seuil=1):
         lignes.append({"host": host, "pattern": pat, "url_representative": rep["url"],
                        "score": grp["score"], "raisons": rep["raisons"], "nb": grp["nb"],
                        "http_status": rep["http_status"], "tech": rep["tech"],
-                       "in_scope": rep["in_scope"], "premiere_vue": grp["premiere_vue"]})
+                       "in_scope": rep["in_scope"], "premiere_vue": grp["premiere_vue"],
+                       "semantique_verdict": rep.get("semantique_verdict")})
     lignes.sort(key=lambda x: (x["score"], x["nb"]), reverse=True)
     # remap {(host, pattern_avant_collapse): pattern_apres} pour migrer les statuts.
     return lignes, {"brut": brut, "apres_1b": apres_1b, "exclus_hors_cible": exclus_hc,
@@ -428,9 +436,10 @@ def persister(lignes, remap=None):
             cur.execute("TRUNCATE leads")
             cur.executemany(
                 "INSERT INTO leads (host, pattern, url_representative, score, raisons, "
-                "nb, http_status, tech, in_scope, premiere_vue, updated_at) VALUES "
-                "(%(host)s, %(pattern)s, %(url_representative)s, %(score)s, %(raisons)s, "
-                "%(nb)s, %(http_status)s, %(tech)s, %(in_scope)s, %(premiere_vue)s, now())", lignes)
+                "nb, http_status, tech, in_scope, premiere_vue, semantique_verdict, updated_at) "
+                "VALUES (%(host)s, %(pattern)s, %(url_representative)s, %(score)s, %(raisons)s, "
+                "%(nb)s, %(http_status)s, %(tech)s, %(in_scope)s, %(premiere_vue)s, "
+                "%(semantique_verdict)s, now())", lignes)
             _reconcilier_ancres(cur)                     # replié -> dé-replié (via ancre_url)
             _marquer_orphelins(cur)
         conn.commit()
