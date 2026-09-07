@@ -29,7 +29,9 @@ POIDS = {
     # fuite_technique : NON scoré (double compte évité).
 }
 
-SEUIL = 2   # |score net| < SEUIL => proche du seuil => incertain (éditable)
+SEUIL = 1   # |score net| < SEUIL => proche du seuil => incertain (éditable). Baissé 2->1 sur
+            # directive : à 2, trop de contenus tombaient en 'incertain' (aucun effet) -> peu de
+            # verdicts tranchés. À 1, un seul nudge net suffit à trancher applicatif/institutionnel.
 
 # --- Composition avec le score DÉTERMINISTE (câblage de PRIORITÉ) --------------
 # S0 — INVERSION : le sémantique REPÊCHE, il ne démote pas. La vue leads ne garde que

@@ -142,7 +142,7 @@ AFFICHAGE_MAX_LEADS_PAR_GROUPE = int(os.environ.get("AFFICHAGE_MAX_LEADS_PAR_GRO
 # passer devant un vrai signal déterministe. AUCUNE requête réseau vers les cibles.
 MODELE_JUGE = os.environ.get("MODELE_JUGE", "claude-sonnet-5")
 EFFORT_JUGE = os.environ.get("EFFORT_JUGE", "low")
-EXTRAIT_JUGE_MAX = int(os.environ.get("EXTRAIT_JUGE_MAX", "4000"))   # coût n°1 : le corps pèse 10x la réponse
+EXTRAIT_JUGE_MAX = int(os.environ.get("EXTRAIT_JUGE_MAX", "2500"))   # coût n°1 : le corps pèse 10x la réponse ; 2500 suffit à classer la NATURE (mur d'auth/API/narratif visibles tôt)
 SEUIL_RESIDU = int(os.environ.get("SEUIL_RESIDU", "4"))             # on ne juge que score 0..SEUIL_RESIDU
 ECHANTILLON_SEM = int(os.environ.get("ECHANTILLON_SEM", "300"))
 MAX_APPELS_JUGE_PAR_RUN = int(os.environ.get("MAX_APPELS_JUGE_PAR_RUN", "300"))  # plafond dépense côté code

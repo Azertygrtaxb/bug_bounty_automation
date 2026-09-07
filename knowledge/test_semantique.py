@@ -98,12 +98,14 @@ class TestDecider(unittest.TestCase):
         self.assertLessEqual(detail["net"], -semantique.SEUIL)
 
     def test_proche_du_seuil_incertain(self):
-        # public (-2) + un seul nudge applicatif (+1) = -1 -> |net| < SEUIL -> incertain
+        # net EXACTEMENT 0 -> incertain quel que soit SEUIL>=1 :
+        # public(-2) + entrees:oui(+1) + objet_parametre:objet(+1) = 0
         classe, detail = semantique.decider({
-            "portee": "public", "entrees": "oui", "objet_parametre": "aucun",
+            "portee": "public", "entrees": "oui", "objet_parametre": "objet",
             "carte_surface": "non", "structure": "fonctionnel",
             "nature_valeurs": "operationnel", "frontiere_auth": "absente",
             "fuite_technique": "non"})
+        self.assertEqual(detail["net"], 0)
         self.assertEqual(classe, "incertain")
 
     def test_valeur_hors_enum_comptee_zero(self):

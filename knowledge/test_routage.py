@@ -9,8 +9,13 @@ from knowledge import routage
 
 
 class TestPlanStrict(unittest.TestCase):
+    # Le DÉFAUT de prod est maintenant REGLE_STRICTE=False (relâché). Ces tests forcent le mode
+    # STRICT localement pour verrouiller sa sémantique, et le restaurent au défaut en tearDown.
     def setUp(self):
-        routage.REGLE_STRICTE = True   # état par défaut, réaffirmé pour l'isolation
+        routage.REGLE_STRICTE = True
+
+    def tearDown(self):
+        routage.REGLE_STRICTE = False   # restaure le vrai défaut de prod
 
     # --- auth_bypass : la famille prouvée de bout en bout -----------------------
     def test_auth_bypass_convergence(self):
@@ -82,8 +87,13 @@ class TestPlanStrict(unittest.TestCase):
 
 
 class TestPlanRelache(unittest.TestCase):
-    def tearDown(self):
-        routage.REGLE_STRICTE = True   # NE PAS fuiter l'état vers les autres tests
+    """Le mode RELÂCHÉ est le DÉFAUT de prod : un seul signal suffit à planifier une sonde,
+    la convergence des deux ne fait que monter la priorité (`convergence`=True)."""
+
+    def test_defaut_est_relache(self):
+        # Garde-fou : le défaut de prod DOIT être relâché (directive). Si quelqu'un remet
+        # True par défaut, ce test casse et le signale.
+        self.assertFalse(routage.REGLE_STRICTE)
 
     def test_relache_un_seul_signal_suffit(self):
         routage.REGLE_STRICTE = False

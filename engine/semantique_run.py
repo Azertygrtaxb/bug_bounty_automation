@@ -178,7 +178,7 @@ def juger_semantique(limite=None, modele=None):
             for c in a_juger:
                 params = MessageCreateParamsNonStreaming(
                     model=modele,
-                    max_tokens=2048,   # couvre raisonnement adaptatif + JSON ; 512 tronquerait
+                    max_tokens=512,    # à effort low la sortie = 8 enums JSON (~90 tokens réels) ; 512 = marge large sans plafond gâché
                     system=[{"type": "text", "text": SYSTEME_JUGE,
                              "cache_control": {"type": "ephemeral"}}],
                     output_config=output_config,

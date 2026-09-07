@@ -17,7 +17,10 @@ le routage dit quel TEST cela justifie. Ni l'un ni l'autre ne juge l'exploitabil
 seule la sonde (qui touche la cible) le fait.
 """
 
-REGLE_STRICTE = True   # True = convergence sémantique+déterministe requise (éditable)
+REGLE_STRICTE = False  # False = un SEUL signal (verdict OU token det) suffit à planifier une
+                       # sonde ; la convergence des deux monte la priorité. Relâché sur
+                       # directive : la convergence stricte produisait trop peu de rendu (0 plan
+                       # sur les premiers runs). `convergence` reste tracé pour prioriser. (éditable)
 
 # --- Familles de sonde : (verdict sémantique requis, {tokens déterministes acceptés}) -----
 # Un token est "présent" si un élément de score_raisons COMMENCE par lui (les raisons
