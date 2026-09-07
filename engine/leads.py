@@ -229,6 +229,11 @@ def _assurer_table(cur):
     # DÉDIÉE (en plus de sa présence dans `raisons`) pour que le dashboard puisse l'afficher
     # comme badge / le filtrer sans parser le texte des raisons. NULL = pas encore jugé.
     cur.execute("ALTER TABLE leads ADD COLUMN IF NOT EXISTS semantique_verdict TEXT")
+    # Domaine parent (registered-domain) du host : permet au dashboard de REGROUPER les leads
+    # d'une même entité (tous les sous-domaines de oneytrust.com ensemble) via GROUP BY, sans
+    # recalculer ni détruire l'info host exacte (que la recon/le hunt utilisent comme cible).
+    cur.execute("ALTER TABLE leads ADD COLUMN IF NOT EXISTS domaine_parent TEXT")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_leads_domaine_parent ON leads (domaine_parent)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_leads_score ON leads (score DESC)")
     cur.execute(
         "CREATE TABLE IF NOT EXISTS leads_statut ("
@@ -311,7 +316,8 @@ def construire(seuil=1):
                        "score": grp["score"], "raisons": rep["raisons"], "nb": grp["nb"],
                        "http_status": rep["http_status"], "tech": rep["tech"],
                        "in_scope": rep["in_scope"], "premiere_vue": grp["premiere_vue"],
-                       "semantique_verdict": rep.get("semantique_verdict")})
+                       "semantique_verdict": rep.get("semantique_verdict"),
+                       "domaine_parent": scope.registered_domain(host)})
     lignes.sort(key=lambda x: (x["score"], x["nb"]), reverse=True)
     # remap {(host, pattern_avant_collapse): pattern_apres} pour migrer les statuts.
     return lignes, {"brut": brut, "apres_1b": apres_1b, "exclus_hors_cible": exclus_hc,
@@ -436,10 +442,11 @@ def persister(lignes, remap=None):
             cur.execute("TRUNCATE leads")
             cur.executemany(
                 "INSERT INTO leads (host, pattern, url_representative, score, raisons, "
-                "nb, http_status, tech, in_scope, premiere_vue, semantique_verdict, updated_at) "
+                "nb, http_status, tech, in_scope, premiere_vue, semantique_verdict, "
+                "domaine_parent, updated_at) "
                 "VALUES (%(host)s, %(pattern)s, %(url_representative)s, %(score)s, %(raisons)s, "
                 "%(nb)s, %(http_status)s, %(tech)s, %(in_scope)s, %(premiere_vue)s, "
-                "%(semantique_verdict)s, now())", lignes)
+                "%(semantique_verdict)s, %(domaine_parent)s, now())", lignes)
             _reconcilier_ancres(cur)                     # replié -> dé-replié (via ancre_url)
             _marquer_orphelins(cur)
         conn.commit()
