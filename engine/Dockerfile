@@ -41,4 +41,7 @@ RUN python -m engine.recon.binaires
 
 # Concurrence bornée et éditable. Le garde-fou binaires tourne aussi au DÉMARRAGE : le
 # worker refuse de démarrer si un binaire externe a été masqué.
-CMD ["sh", "-c", "python -m engine.recon.binaires && celery -A engine.celery_app worker --loglevel=INFO --concurrency=${CELERY_CONCURRENCY:-8}"]
+# --beat embarque le planificateur DANS le worker (Celery Beat) : le juge sémantique
+# continu (celery_app.beat_schedule, actif si SEM_BEAT_ACTIF=1) est déclenché sans service
+# séparé. --schedulefile sous /tmp = état de Beat (dernier tick) qui survit à un restart.
+CMD ["sh", "-c", "python -m engine.recon.binaires && celery -A engine.celery_app worker --beat --schedule=/tmp/celerybeat-schedule --loglevel=INFO --concurrency=${CELERY_CONCURRENCY:-8}"]

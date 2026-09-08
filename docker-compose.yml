@@ -44,6 +44,10 @@ services:
       # Juge sémantique (S5.1) : clé UNIQUEMENT ici (le worker appelle le LLM). JAMAIS dans
       # le service board (exposé sur Internet). Le worker n'a pas d'env_file -> la déclarer ici.
       ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY:-}"
+      # Juge sémantique EN CONTINU (Celery Beat) : tourne périodiquement sur le résidu et
+      # alimente le dashboard V2 sans déclenchement manuel. 1 = actif. Le RYTHME = la dépense.
+      SEM_BEAT_ACTIF: "${SEM_BEAT_ACTIF:-0}"                 # 1 = planifier le juge en continu
+      SEM_BEAT_INTERVALLE_S: "${SEM_BEAT_INTERVALLE_S:-7200}" # défaut 2h entre deux batchs
     depends_on:
       postgres:
         condition: service_healthy
