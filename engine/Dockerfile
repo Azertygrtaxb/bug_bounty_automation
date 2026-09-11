@@ -44,4 +44,4 @@ RUN python -m engine.recon.binaires
 # --beat embarque le planificateur DANS le worker (Celery Beat) : le juge sémantique
 # continu (celery_app.beat_schedule, actif si SEM_BEAT_ACTIF=1) est déclenché sans service
 # séparé. --schedulefile sous /tmp = état de Beat (dernier tick) qui survit à un restart.
-CMD ["sh", "-c", "python -m engine.recon.binaires && celery -A engine.celery_app worker --beat --schedule=/tmp/celerybeat-schedule --loglevel=INFO --concurrency=${CELERY_CONCURRENCY:-8}"]
+CMD ["sh", "-c", "python -m engine.recon.binaires && celery -A engine.celery_app worker --beat --schedule=/tmp/celerybeat-schedule --loglevel=INFO --concurrency=${CELERY_CONCURRENCY:-2} --prefetch-multiplier=${CELERY_PREFETCH_MULTIPLIER:-1} --max-tasks-per-child=${CELERY_MAX_TASKS_PER_CHILD:-1}"]

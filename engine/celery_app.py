@@ -8,6 +8,27 @@ BROKER_URL = os.environ["CELERY_BROKER_URL"]
 # de suivre la complétion des tâches (AsyncResult.ready/get).
 RESULT_BACKEND = os.environ.get("CELERY_RESULT_BACKEND", BROKER_URL)
 
+
+def _entier_worker(nom, defaut):
+    """Lit un réglage worker positif, sans laisser une faute de `.env` désactiver
+    silencieusement un garde-fou mémoire."""
+    try:
+        valeur = int(os.environ.get(nom, str(defaut)))
+    except (TypeError, ValueError):
+        return defaut
+    return valeur if valeur > 0 else defaut
+
+
+def _planning_semantique(intervalle):
+    """Une seule entrée Beat : jugement, commit du score, puis rebuild sous verrou."""
+    return {
+        "semantique-score-rebuild-continu": {
+            "task": "juger_semantique_puis_score_rebuild",
+            "schedule": intervalle,
+        },
+    }
+
+
 app = Celery(
     "bb_automation",
     broker=BROKER_URL,
@@ -15,7 +36,14 @@ app = Celery(
     include=["engine.tasks", "engine.recon.discover", "engine.scoring.score",
              "engine.probe.probe", "engine.semantique_run"],
 )
-app.conf.result_expires = 3600
+app.conf.update(
+    result_expires=3600,
+    # Le CLI du conteneur reprend les mêmes variables. Les déclarer aussi ici rend
+    # les limites effectives pour tout démarrage alternatif du worker.
+    worker_concurrency=_entier_worker("CELERY_CONCURRENCY", 2),
+    worker_prefetch_multiplier=_entier_worker("CELERY_PREFETCH_MULTIPLIER", 1),
+    worker_max_tasks_per_child=_entier_worker("CELERY_MAX_TASKS_PER_CHILD", 1),
+)
 
 # --- Juge sémantique EN CONTINU (Celery Beat) ------------------------------------------
 # Le juge tourne périodiquement sur le résidu non encore jugé et alimente le dashboard V2
@@ -28,27 +56,6 @@ app.conf.result_expires = 3600
 # ne juge que le résidu NON déjà jugé -> quand le résidu est vide, un tour ne coûte rien.
 if os.environ.get("SEM_BEAT_ACTIF", "0") == "1":
     _intervalle = float(os.environ.get("SEM_BEAT_INTERVALLE_S", "7200"))
-    # Décalage du re-score/rebuild APRÈS le juge : le batch LLM peut durer plusieurs minutes.
-    # On lance la propagation sur le MÊME intervalle mais décalée, pour que les verdicts du
-    # tour précédent soient déjà persistés quand score_targets/rebuild_leads tournent.
-    #   juger    à t = k·intervalle
-    #   propager à t = k·intervalle + SEM_BEAT_PROPAGE_DECALAGE_S (défaut 900s = 15 min)
-    _decalage = float(os.environ.get("SEM_BEAT_PROPAGE_DECALAGE_S", "900"))
-    app.conf.beat_schedule = {
-        "juge-semantique-continu": {
-            "task": "juger_semantique",
-            "schedule": _intervalle,
-        },
-        # score_targets : lit semantique_verdict -> composer_priorite (repêchage) + remplit
-        # sonde_plan (routage). rebuild_leads : propage vers la table `leads` (dashboard).
-        "sem-rescore-continu": {
-            "task": "score_targets",
-            "schedule": _intervalle,
-            "options": {"countdown": _decalage},
-        },
-        "sem-rebuild-leads-continu": {
-            "task": "rebuild_leads",
-            "schedule": _intervalle,
-            "options": {"countdown": _decalage + 120},  # après le re-score
-        },
-    }
+    # Aucun délai estimé : le juge peut durer des heures. La tâche tient le même verrou de
+    # session jusqu'au commit score puis au rebuild ; un tick concurrent saute toute la chaîne.
+    app.conf.beat_schedule = _planning_semantique(_intervalle)

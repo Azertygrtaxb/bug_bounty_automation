@@ -23,6 +23,12 @@ from knowledge import config, corps, semantique, signaux, sonde
 DATABASE_URL = os.environ["DATABASE_URL"]
 POLL_SECONDES = int(os.environ.get("SEM_POLL_SECONDES", "15"))
 
+# Verrou PostgreSQL de SESSION : contrairement à pg_try_advisory_xact_lock, il survit aux
+# commits intermédiaires (exclusions puis verdicts). La connexion est dédiée à un run et sa
+# fermeture libère toujours le verrou, y compris après exception ou OOM du processus.
+_VERROU_NAMESPACE = 0x62627365  # "bbse", int32 stable
+_VERROU_JUGE = 1
+
 # --- Les 8 faits en valeurs FERMÉES. Les valeurs "porteuses" viennent des tables POIDS de
 # semantique.py ; on ajoute leur complément neutre (compté 0). Une valeur hors enum est
 # impossible (structured outputs) et ne serait comptée par aucune règle. ---
@@ -114,6 +120,36 @@ def selectionner(cur, limite):
     return out
 
 
+def _prendre_verrou_jugement(cur):
+    """False si un autre `juger_semantique` détient déjà le verrou de session."""
+    cur.execute("SELECT pg_try_advisory_lock(%s, %s)",
+                (_VERROU_NAMESPACE, _VERROU_JUGE))
+    row = cur.fetchone()
+    return bool(row and row[0])
+
+
+def _sous_verrou_jugement(operation, note_chevauchement):
+    """Exécute `operation` sous un verrou de session porté par une connexion dédiée.
+
+    Le commit après l'acquisition évite une session « idle in transaction » pendant le
+    batch LLM. Le verrou reste détenu jusqu'au `close()` en finally.
+    """
+    lock_conn = psycopg.connect(DATABASE_URL)
+    try:
+        with lock_conn.cursor() as cur:
+            acquis = _prendre_verrou_jugement(cur)
+        lock_conn.commit()
+        if not acquis:
+            return {
+                "juges": 0,
+                "ignore_chevauchement": True,
+                "note": note_chevauchement,
+            }
+        return operation()
+    finally:
+        lock_conn.close()
+
+
 def _persister(cur, tid, faits, verdict, modele, usage):
     cur.execute(
         "UPDATE targets SET semantique_faits = %s, semantique_verdict = %s, "
@@ -123,8 +159,7 @@ def _persister(cur, tid, faits, verdict, modele, usage):
          Json(usage) if usage is not None else None, tid))
 
 
-@app.task(name="juger_semantique")
-def juger_semantique(limite=None, modele=None):
+def _executer_jugement(limite=None, modele=None):
     """S1→S3. Renvoie un résumé {juges, exclus_auth_wall, erreurs, plafond_atteint, ...}.
     `modele` override (S4.5 : rejouer le même échantillon sur claude-haiku-4-5)."""
     # S5.2 — clé obligatoire, message explicite (pas de trace muette).
@@ -212,6 +247,39 @@ def juger_semantique(limite=None, modele=None):
 
     return {"juges": juges, "exclus_auth_wall": exclus, "erreurs": erreurs,
             "non_juges_plafond": saute_plafond, "modele": modele}
+
+
+@app.task(name="juger_semantique")
+def juger_semantique(limite=None, modele=None):
+    """Tâche manuelle conservée ; elle partage le verrou avec la chaîne Beat."""
+    return _sous_verrou_jugement(
+        lambda: _executer_jugement(limite, modele),
+        "un autre jugement ou pipeline sémantique est déjà en cours",
+    )
+
+
+@app.task(name="juger_semantique_puis_score_rebuild")
+def juger_semantique_puis_score_rebuild(limite=None, modele=None, seuil=1):
+    """Chaîne Beat singleton, synchrone : juger → commit score → rebuild.
+
+    Appelle uniquement les fonctions Python internes : aucun `AsyncResult.get()` imbriqué.
+    """
+    def operation():
+        from engine.scoring.score import _reconstruire_leads, _scorer_targets
+
+        juge_resume = _executer_jugement(limite, modele)
+        score_resume = _scorer_targets()  # commit complet avant son retour
+        rebuild_resume = _reconstruire_leads(seuil)
+        return {
+            "juger_semantique": juge_resume,
+            "score_targets": score_resume,
+            "rebuild_leads": rebuild_resume,
+        }
+
+    return _sous_verrou_jugement(
+        operation,
+        "un autre jugement ou pipeline sémantique est déjà en cours; chaîne ignorée",
+    )
 
 
 def _faits_de_message(msg):

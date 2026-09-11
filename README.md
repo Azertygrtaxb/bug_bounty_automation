@@ -144,15 +144,19 @@ docker compose exec worker python -c "from engine.scoring.score import score_tar
 
 ## Réglage du débit (rate-limiter)
 
-Les variables sont pilotées par `.env` (interpolées dans le service `worker` de
-`docker-compose.yml`). **Piège important** : `RL_GLOBAL_MAX_HOSTS` au-delà de
-`CELERY_CONCURRENCY` n'a **aucun effet** — le nombre de hosts crawlés en parallèle est le
-**minimum des deux** (un worker Celery = un host à la fois). Pour vraiment monter à 24 hosts
-simultanés il faut `CELERY_CONCURRENCY=24` ET `RL_GLOBAL_MAX_HOSTS=24`.
+Les limites de débit sont pilotées par `.env` (interpolées dans le service `worker` de
+`docker-compose.yml`). **Piège important** : `RL_GLOBAL_MAX_HOSTS` au-delà de la concurrence
+Celery n'a **aucun effet** — le nombre de hosts crawlés en parallèle est le minimum des deux.
+
+Le profil mémoire sûr est suivi dans `docker-compose.yml` : concurrence `2`, prefetch `1`
+et recyclage du processus fils après chaque tâche. Une ancienne valeur `.env` ne peut pas
+le relever. Il évite qu'un ancien gros scoring conserve sa RAM et qu'un processus réserve
+plusieurs jobs. Ces limites n'activent pas `acks_late`. Toute hausse exige un commit et une
+revue de capacité.
 
 Vérifier ce que le conteneur reçoit réellement :
 ```bash
-docker compose config | grep -E "CELERY_CONCURRENCY|RL_"
+docker compose config | grep -E "CELERY_(CONCURRENCY|PREFETCH_MULTIPLIER|MAX_TASKS_PER_CHILD)|RL_"
 ```
 Surcharge locale temporaire sur le VPS : `docker-compose.override.yml` (gitignoré, à
 supprimer une fois le lot déployé).

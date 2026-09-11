@@ -26,9 +26,12 @@ services:
       # URLs internes au réseau Docker (services joignables par leur nom).
       CELERY_BROKER_URL: redis://redis:6379/0
       DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
-      # --- Kit de survie du rush : rate-limit + concurrence. INTERPOLÉS depuis .env (A3) —
-      # avant, les valeurs étaient codées en dur : .env=24 mais le conteneur recevait 4. ---
-      CELERY_CONCURRENCY: "${CELERY_CONCURRENCY:-8}"     # workers : hosts DISTINCTS en parallèle
+      # --- Garde-fous mémoire suivis dans Git : une ancienne valeur .env ne doit pas
+      # réactiver 8/24 processus au prochain déploiement. Toute hausse exige donc un commit. ---
+      CELERY_CONCURRENCY: "2"              # 2 processus : borne la RAM du prefork
+      CELERY_PREFETCH_MULTIPLIER: "1"      # pas de réserve cachée par processus
+      CELERY_MAX_TASKS_PER_CHILD: "1"      # recycle la RAM après chaque tâche
+      # --- Rate-limit du rush, éditable via .env. ---
       RL_GLOBAL_RPS: "${RL_GLOBAL_RPS:-5}"               # cap global req/s (egress Python)
       RL_FILIALE_RPS: "${RL_FILIALE_RPS:-2}"             # cap req/s par filiale/infra
       RL_GLOBAL_MAX_HOSTS: "${RL_GLOBAL_MAX_HOSTS:-4}"   # hosts distincts simultanés (global)
