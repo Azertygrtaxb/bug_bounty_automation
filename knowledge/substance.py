@@ -133,3 +133,57 @@ def is_error_page(status, title, body_len):
     if status in ERROR_STATUS_WAF and (body_len is None or body_len < ERROR_WAF_MAXLEN):
         return True
     return False
+
+
+# --- SSRF (brique B, réorientation high) ------------------------------------
+SSRF_PARAM_BONUS = 7   # candidat SSRF = classe à fort impact ; poids > open_redirect (6).
+SSRF_PARAMS = {
+    "url", "uri", "link", "src", "source", "fetch", "fetchurl", "load",
+    "loadurl", "proxy", "proxyurl", "remote", "remoteurl", "dest", "target",
+    "endpoint", "callback", "webhook", "webhookurl", "image", "imageurl",
+    "imgurl", "img_url", "avatar", "avatarurl", "file", "fileurl", "path",
+    "domain", "host", "server", "feed", "feedurl", "rss", "xml", "wsdl",
+    "data", "resource", "site", "page", "open", "read", "get", "request",
+}
+
+
+def params_ssrf_presents(url):
+    """Params SSRF-ables présents avec une valeur URL-like (détection de surface, pure)."""
+    from urllib.parse import urlsplit, parse_qsl
+    trouves = []
+    for key, val in parse_qsl(urlsplit(url).query, keep_blank_values=True):
+        k = key.lower()
+        if k not in SSRF_PARAMS or not val:
+            continue
+        v = val.strip().lower()
+        if ("://" in v or v.startswith("//") or v.startswith("http")
+                or ("." in v and "/" in v) or v == "localhost"):
+            trouves.append(k)
+    return sorted(set(trouves))
+
+
+def a_param_ssrfable(url):
+    """True si un param au NOM SSRF-able est présent (même sans valeur URL-like)."""
+    from urllib.parse import urlsplit, parse_qsl
+    for key, _ in parse_qsl(urlsplit(url).query, keep_blank_values=True):
+        if key.lower() in SSRF_PARAMS:
+            return True
+    return False
+
+# --- Params candidats par classe (détection de surface, pure) ----------------
+SQLI_PARAMS = {"q", "query", "search", "s", "filter", "sort", "order", "orderby",
+               "where", "id", "cat", "category", "name", "user", "email", "lang",
+               "page", "limit", "offset", "field", "column", "table", "select"}
+SSTI_PARAMS = {"template", "tpl", "view", "render", "locale",
+               "message", "msg", "greeting", "subject",
+               "content", "preview", "format", "theme", "layout"}
+
+
+def params_de(url, ensemble):
+    """Params présents (nom dans `ensemble`) avec valeur non vide. Surface, pure."""
+    from urllib.parse import urlsplit, parse_qsl
+    out = []
+    for k, v in parse_qsl(urlsplit(url).query, keep_blank_values=True):
+        if k.lower() in ensemble and v:
+            out.append(k)
+    return sorted(set(out))

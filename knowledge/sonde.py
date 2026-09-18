@@ -88,3 +88,19 @@ def est_content_type_asset(ct):
     if ct in ASSET_CONTENT_TYPES:
         return True
     return (ct.split("/")[0] + "/*") in ASSET_CONTENT_TYPES
+
+
+# --- SSRF (réflexion locale, ROE-safe) --------------------------------------
+SSRF_MAX_ENDPOINTS_PAR_HOST = 12
+SSRF_ECART_MIN = 0.15
+SSRF_ECART_TIMING = 2.0
+SSRF_PARAM_BONUS = 7
+SSRF_TEMOIN_TMPL = "http://ssrf-canary-nonexistent.{host}/"
+
+# --- SSTI / SQLi / déser (probes high, détection prudente) -------------------
+SSTI_MAX_ENDPOINTS_PAR_HOST = 12
+SSTI_MARQUEUR = "1337"          # 7*191 = 1337 : produit improbable dans une page normale
+SSTI_PAYLOADS = ["{{7*191}}", "${7*191}", "#{7*191}", "<%= 7*191 %>", "*{7*191}"]
+SQLI_MAX_ENDPOINTS_PAR_HOST = 12
+SQLI_ECART_MIN = 0.15           # écart guillemet-cassant vs échappé => anomalie SQL
+DESER_MAX_ENDPOINTS_PAR_HOST = 12

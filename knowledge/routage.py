@@ -37,12 +37,20 @@ FAMILLES = {
                       "det": {"cors_permissif"}},
     "open_redirect": {"verdict": "applicatif",
                       "det": {"open_redirect_possible"}},
+    "ssrf":          {"verdict": "applicatif",
+                      "det": {"ssrf_param_possible"}},
+    "sqli":          {"verdict": "applicatif",
+                      "det": {"sqli_param_possible"}},
+    "ssti":          {"verdict": "applicatif",
+                      "det": {"ssti_param_possible"}},
+    "deser":         {"verdict": "applicatif",
+                      "det": {"deser_surface"}},
 }
 
 # Familles dont la tâche probe_* existe RÉELLEMENT (les seules qu'on ose planifier pour de
 # vrai). Élargir en ajoutant la tâche + le nom. Toutes actives : idor (probe_idor_candidates),
 # auth_bypass (probe_auth_bypass), cors (probe_cors), open_redirect (probe_open_redirect).
-FAMILLES_ACTIVES = {"idor", "auth_bypass", "cors", "open_redirect"}
+FAMILLES_ACTIVES = {"idor", "auth_bypass", "cors", "open_redirect", "ssrf", "sqli", "ssti", "deser"}
 
 
 def _present(token, raisons):
@@ -67,7 +75,7 @@ def plan(verdict_sem, score_raisons, actives_seulement=True):
         if REGLE_STRICTE:
             declenche = verdict_ok and bool(tokens_presents)
         else:
-            declenche = verdict_ok or bool(tokens_presents)
+            declenche = bool(tokens_presents) or (verdict_ok and not regle["det"])
         if declenche:
             out.append({
                 "famille": famille,

@@ -351,6 +351,18 @@ def main(argv):
             orr = [(h, app.send_task("probe_open_redirect", args=[h])) for h in deep]
             _wait_all(orr, "TIER2 sonde open-redirect", phase="sonde_openredir",
                       continuer_si_incomplet=continuer)
+            sr = [(h, app.send_task("probe_ssrf", args=[h])) for h in deep]
+            _wait_all(sr, "TIER2 sonde ssrf", phase="sonde_ssrf",
+                      continuer_si_incomplet=continuer)
+            ss = [(h, app.send_task("probe_ssti", args=[h])) for h in deep]
+            _wait_all(ss, "TIER2 sonde ssti", phase="sonde_ssti",
+                      continuer_si_incomplet=continuer)
+            sq = [(h, app.send_task("probe_sqli", args=[h])) for h in deep]
+            _wait_all(sq, "TIER2 sonde sqli", phase="sonde_sqli",
+                      continuer_si_incomplet=continuer)
+            sd = [(h, app.send_task("probe_deser", args=[h])) for h in deep]
+            _wait_all(sd, "TIER2 sonde deser", phase="sonde_deser",
+                      continuer_si_incomplet=continuer)
     except Exception as e:
         sys.stderr.write("\n[rush] ÉCHEC : %s\n-> RELANCE la MÊME commande avec --reprendre : "
                          "les hosts déjà traités seront sautés (le tier 1 ne sera PAS refait).\n" % e)

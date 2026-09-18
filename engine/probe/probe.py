@@ -654,3 +654,212 @@ def probe_open_redirect(host):
             "open_redirects_prouves": len(resultats),
             "requetes_utilisees": sonde.MAX_REQUETES_PAR_HOST - budget["restant"],
             "resultats": resultats}
+
+
+@app.task(name="probe_ssrf")
+def probe_ssrf(host):
+    """Sonde SSRF par RÉFLEXION LOCALE (brique B), CONFINÉE au host. ROE-safe :
+    baseline (valeur non-URL) vs témoin (URL vers sous-domaine INEXISTANT du host) ;
+    un comportement différent (statut/contenu/timing) = le serveur TRAITE l'URL =
+    CANDIDAT SSRF (preuve exécutée de fetch serveur ; exploitabilité à confirmer humain).
+    Aucune cible interne/tierce touchée."""
+    import time as _t
+    from urllib.parse import urlsplit, urlunsplit, parse_qsl, urlencode
+    from knowledge import substance
+
+    a_sonder = _endpoints_planifies(host, "ssrf",
+                                    limite=sonde.SSRF_MAX_ENDPOINTS_PAR_HOST)
+
+    def _muter_param(url, val_rempl):
+        parts = urlsplit(url)
+        pairs = parse_qsl(parts.query, keep_blank_values=True)
+        touches, nouveaux = [], []
+        for k, v in pairs:
+            if k.lower() in substance.SSRF_PARAMS:
+                nouveaux.append((k, val_rempl)); touches.append(k)
+            else:
+                nouveaux.append((k, v))
+        nq = urlencode(nouveaux)
+        return urlunsplit((parts.scheme, parts.netloc, parts.path, nq, parts.fragment)), touches
+
+    temoin = sonde.SSRF_TEMOIN_TMPL.format(host=host)
+    budget = {"restant": sonde.MAX_REQUETES_PAR_HOST}
+    resultats = []
+
+    for rid, url, _statut in a_sonder:
+        if budget["restant"] <= 2:
+            log.warning("sonde ssrf: budget epuise, arret (ROE)"); break
+        if not substance.a_param_ssrfable(url):
+            continue
+        url_base, touches = _muter_param(url, "benign-string-not-a-url")
+        url_tem, _ = _muter_param(url, temoin)
+        if not touches:
+            continue
+
+        t0 = _t.monotonic()
+        st_b, body_b, _ = _requete_mutee(url_base, host, "GET")
+        dt_b = _t.monotonic() - t0
+        budget["restant"] -= 1; time.sleep(sonde.DELAI_ENTRE_REQUETES)
+        if budget["restant"] <= 0:
+            break
+
+        t0 = _t.monotonic()
+        st_t, body_t, _ = _requete_mutee(url_tem, host, "GET")
+        dt_t = _t.monotonic() - t0
+        budget["restant"] -= 1; time.sleep(sonde.DELAI_ENTRE_REQUETES)
+
+        sim = round(_similarite([body_b or "", body_t or ""]), 3)
+        statut_diff = (st_b != st_t)
+        contenu_diff = (sim < (1.0 - sonde.SSRF_ECART_MIN))
+        timing_diff = (dt_b > 0 and dt_t >= dt_b * sonde.SSRF_ECART_TIMING)
+
+        if statut_diff or contenu_diff or timing_diff:
+            signes = []
+            if statut_diff:  signes.append("statut %s->%s" % (st_b, st_t))
+            if contenu_diff: signes.append("contenu sim=%s" % sim)
+            if timing_diff:  signes.append("timing x%.1f" % (dt_t / dt_b if dt_b else 0))
+            texte = ("sonde ssrf (reflexion locale): params %s ; le serveur TRAITE "
+                     "l'URL temoin (%s) -> CANDIDAT SSRF (preuve executee ; "
+                     "exploitabilite a confirmer humainement)"
+                     % (",".join(touches), " / ".join(signes)))
+            _appliquer({"delta": sonde.SSRF_PARAM_BONUS, "texte": texte}, [{"row_id": rid}])
+            resultats.append({"row_id": rid, "url": url, "params": touches, "signes": signes})
+        else:
+            _appliquer({"delta": 0,
+                        "texte": "sonde ssrf: params %s, comportement identique "
+                                 "baseline/temoin -> pas de signe de fetch serveur"
+                                 % ",".join(touches)}, [{"row_id": rid}])
+
+    return {"host": host, "endpoints_planifies": len(a_sonder),
+            "candidats_ssrf": len(resultats),
+            "requetes_utilisees": sonde.MAX_REQUETES_PAR_HOST - budget["restant"],
+            "budget_max": sonde.MAX_REQUETES_PAR_HOST, "resultats": resultats}
+
+@app.task(name="probe_ssti")
+def probe_ssti(host):
+    """Sonde SSTI (injection de CALCUL bénin), CONFINÉE au host. Injecte {{7*191}}
+    & variantes ; si la réponse contient le PRODUIT (1337) alors qu'il n'était pas
+    dans la baseline, le template ÉVALUE l'expression -> SSTI crédible (preuve
+    exécutée, calcul inoffensif, aucune commande). Verif humaine requise."""
+    from urllib.parse import urlsplit, urlunsplit, parse_qsl, urlencode
+    from knowledge import substance
+    a_sonder = _endpoints_planifies(host, "ssti", limite=sonde.SSTI_MAX_ENDPOINTS_PAR_HOST)
+
+    def _muter(url, val):
+        parts = urlsplit(url); pairs = parse_qsl(parts.query, keep_blank_values=True)
+        touches, nv = [], []
+        for k, v in pairs:
+            if k.lower() in substance.SSTI_PARAMS:
+                nv.append((k, val)); touches.append(k)
+            else: nv.append((k, v))
+        return urlunsplit((parts.scheme, parts.netloc, parts.path,
+                           urlencode(nv), parts.fragment)), touches
+
+    budget = {"restant": sonde.MAX_REQUETES_PAR_HOST}; resultats = []
+    for rid, url, _st in a_sonder:
+        if budget["restant"] <= 2: break
+        if not substance.params_de(url, substance.SSTI_PARAMS): continue
+        # baseline : valeur neutre (le marqueur ne doit PAS déjà y être)
+        url_b, touches = _muter(url, "zzsstibaseline")
+        if not touches: continue
+        _stb, body_b, _ = _requete_mutee(url_b, host, "GET")
+        budget["restant"] -= 1; time.sleep(sonde.DELAI_ENTRE_REQUETES)
+        if sonde.SSTI_MARQUEUR in (body_b or ""): continue  # déjà présent -> non concluant
+        trouve = None
+        for payload in sonde.SSTI_PAYLOADS:
+            if budget["restant"] <= 0: break
+            url_p, _ = _muter(url, payload)
+            _stp, body_p, _ = _requete_mutee(url_p, host, "GET")
+            budget["restant"] -= 1; time.sleep(sonde.DELAI_ENTRE_REQUETES)
+            if sonde.SSTI_MARQUEUR in (body_p or ""):
+                trouve = payload; break
+        if trouve:
+            texte = ("sonde ssti: params %s ; payload %s -> le template EVALUE (marqueur "
+                     "%s present) -> SSTI CREDIBLE (preuve executee, calcul benin ; "
+                     "verif humaine)" % (",".join(touches), trouve, sonde.SSTI_MARQUEUR))
+            _appliquer({"delta": 8, "texte": texte}, [{"row_id": rid}])
+            resultats.append({"row_id": rid, "url": url, "payload": trouve})
+        else:
+            _appliquer({"delta": 0, "texte": "sonde ssti: params %s, aucun payload evalue"
+                        % ",".join(touches)}, [{"row_id": rid}])
+    return {"host": host, "endpoints_planifies": len(a_sonder),
+            "candidats_ssti": len(resultats),
+            "requetes_utilisees": sonde.MAX_REQUETES_PAR_HOST - budget["restant"],
+            "resultats": resultats}
+
+
+@app.task(name="probe_sqli")
+def probe_sqli(host):
+    """Sonde SQLi DIFFÉRENTIELLE (pas de dump), CONFINÉE au host. Compare la réponse
+    à une valeur avec guillemet CASSANT (') vs guillemet ÉCHAPPÉ ('') : si le
+    comportement diffère nettement (statut/contenu), la valeur touche une requête SQL
+    -> SQLi crédible. Aucune extraction de données. Verif humaine requise."""
+    from urllib.parse import urlsplit, urlunsplit, parse_qsl, urlencode
+    from knowledge import substance
+    a_sonder = _endpoints_planifies(host, "sqli", limite=sonde.SQLI_MAX_ENDPOINTS_PAR_HOST)
+
+    def _muter(url, suffixe):
+        parts = urlsplit(url); pairs = parse_qsl(parts.query, keep_blank_values=True)
+        touches, nv = [], []
+        for k, v in pairs:
+            if k.lower() in substance.SQLI_PARAMS:
+                nv.append((k, v + suffixe)); touches.append(k)
+            else: nv.append((k, v))
+        return urlunsplit((parts.scheme, parts.netloc, parts.path,
+                           urlencode(nv), parts.fragment)), touches
+
+    budget = {"restant": sonde.MAX_REQUETES_PAR_HOST}; resultats = []
+    for rid, url, _st in a_sonder:
+        if budget["restant"] <= 2: break
+        if not substance.params_de(url, substance.SQLI_PARAMS): continue
+        url_cass, touches = _muter(url, "'")       # guillemet cassant
+        url_ech, _ = _muter(url, "''")             # guillemet échappé (neutre en SQL)
+        if not touches: continue
+        st_c, body_c, _ = _requete_mutee(url_cass, host, "GET")
+        budget["restant"] -= 1; time.sleep(sonde.DELAI_ENTRE_REQUETES)
+        if budget["restant"] <= 0: break
+        st_e, body_e, _ = _requete_mutee(url_ech, host, "GET")
+        budget["restant"] -= 1; time.sleep(sonde.DELAI_ENTRE_REQUETES)
+        sim = round(_similarite([body_c or "", body_e or ""]), 3)
+        # erreur SQL explicite dans la réponse cassante = signal fort
+        err = any(x in (body_c or "").lower() for x in
+                  ("sql syntax", "sqlstate", "odbc", "ora-0", "psql", "mysql_fetch",
+                   "unclosed quotation", "quoted string not properly"))
+        statut_diff = (st_c != st_e)
+        contenu_diff = (sim < (1.0 - sonde.SQLI_ECART_MIN))
+        if err or statut_diff or contenu_diff:
+            signes = []
+            if err: signes.append("erreur SQL en reponse")
+            if statut_diff: signes.append("statut %s vs %s" % (st_c, st_e))
+            if contenu_diff: signes.append("contenu sim=%s" % sim)
+            texte = ("sonde sqli (differentiel ' vs ''): params %s -> %s -> SQLi "
+                     "CREDIBLE (preuve executee, pas d'extraction ; verif humaine)"
+                     % (",".join(touches), " / ".join(signes)))
+            _appliquer({"delta": 8 if err else 5, "texte": texte}, [{"row_id": rid}])
+            resultats.append({"row_id": rid, "url": url, "signes": signes})
+        else:
+            _appliquer({"delta": 0, "texte": "sonde sqli: params %s, ' et '' identiques "
+                        "-> pas d'injection" % ",".join(touches)}, [{"row_id": rid}])
+    return {"host": host, "endpoints_planifies": len(a_sonder),
+            "candidats_sqli": len(resultats),
+            "requetes_utilisees": sonde.MAX_REQUETES_PAR_HOST - budget["restant"],
+            "resultats": resultats}
+
+
+@app.task(name="probe_deser")
+def probe_deser(host):
+    """Sonde DÉSER — DÉTECTION DE SURFACE seule (aucune injection de gadget, trop
+    dangereux). Confirme la présence d'un blob sérialisé (__VIEWSTATE, rO0AB Java...)
+    sur techno sérialisante, et FLAGGE l'endpoint pour investigation humaine ciblée.
+    Ne teste pas l'exécution : la déser exploitée = revue humaine obligatoire."""
+    a_sonder = _endpoints_planifies(host, "deser", limite=sonde.DESER_MAX_ENDPOINTS_PAR_HOST)
+    resultats = []
+    for rid, url, _st in a_sonder:
+        # le signal deser_surface a déjà convergé côté scoring ; ici on marque
+        # l'endpoint comme cible d'audit déser manuel (pas de requête : surface pure).
+        texte = ("sonde deser: blob serialise sur techno serialisante detecte "
+                 "-> SURFACE DESER (audit humain cible requis ; aucun gadget injecte)")
+        _appliquer({"delta": 4, "texte": texte}, [{"row_id": rid}])
+        resultats.append({"row_id": rid, "url": url})
+    return {"host": host, "endpoints_planifies": len(a_sonder),
+            "surfaces_deser": len(resultats), "resultats": resultats}

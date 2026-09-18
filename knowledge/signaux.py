@@ -28,7 +28,9 @@ import re
 from urllib.parse import parse_qsl, urlencode, urlsplit
 
 from knowledge.dedup import PLACEHOLDERS
-from knowledge.substance import (ERROR_RETURN_PARAMS, OPEN_REDIRECT_BONUS,
+from knowledge.substance import (SQLI_PARAMS, SSTI_PARAMS, params_de,
+    SSRF_PARAM_BONUS, params_ssrf_presents,
+    ERROR_RETURN_PARAMS, OPEN_REDIRECT_BONUS,
                                  is_canonical_redirect, is_error_page, is_malformed,
                                  is_param_driven_redirect)
 
@@ -87,12 +89,28 @@ _VERB_STATE = re.compile(
 
 # Surface exposée, par gravité décroissante (le premier motif qui matche gagne).
 _SURFACE_TIERS = [
+    # Palier CRITIQUE (+8) : fuite directe de secret / config / dump.
     (re.compile(
         r"(/\.git|/\.env|/\.aws|/id_rsa|/actuator/env|/actuator/heapdump"
-        r"|/actuator/threaddump|/actuator/mappings|/credentials|/secrets)",
+        r"|/actuator/threaddump|/actuator/mappings|/credentials|/secrets"
+        r"|\.sql($|\?)|\.bak($|\?)|/\.svn|/\.htpasswd|/wp-config)",
         re.IGNORECASE), 8),
-    (re.compile(r"(/actuator|/metrics|/debug|/console|/api/dev|/dev/)", re.IGNORECASE), 5),
-    (re.compile(r"(swagger|openapi|graphql|graphiql)", re.IGNORECASE), 3),
+    # Palier ADMIN/INTERNE (+6) : panel d'administration ou surface interne exposée.
+    # Un backoffice accessible = potentiel critical ; le statut HTTP module en aval
+    # (un /admin en 401/403 sera pondéré, un /admin en 200 garde tout son poids).
+    (re.compile(
+        r"(/admin(/|$|\?)|/administrator|/backoffice|/back-office|/wp-admin"
+        r"|/manage(/|$)|/management|/console|/dashboard|/adminer|/phpmyadmin"
+        r"|/actuator|/metrics|/debug|/api/dev|/dev/|/internal(/|$)|/_internal)",
+        re.IGNORECASE), 6),
+    # Palier API/SURFACE APPLICATIVE (+4) : endpoint d'API = surface d'attaque riche
+    # (IDOR/BOLA, injection, auth). Distinct de la simple DOC d'API (swagger, +3).
+    (re.compile(
+        r"(/api/|/graphql($|/|\?)|/rest/|/v[0-9]+/|/gateway/|/services/"
+        r"|\.wsdl($|\?)|/soap|/rpc|/jsonrpc)",
+        re.IGNORECASE), 4),
+    # Palier DOC d'API (+3) : documentation exposée (utile mais pas la surface elle-même).
+    (re.compile(r"(swagger|openapi|graphiql|/redoc|/api-docs)", re.IGNORECASE), 3),
 ]
 
 # --- Produits à surface d'attaque connue (LU dans tech[]/title, pas l'URL) -----
@@ -251,6 +269,16 @@ def _is_asset_dir(t):
     segs = (s.lower() for s in urlsplit(_url(t)).path.split("/") if s)
     return any(s in ASSET_DIRS for s in segs)
 
+_WP_PUBLIC_API_RE = re.compile(r"/wp-json/wp/v[0-9]+/", re.I)
+
+
+def _is_wp_public_api(t):
+    """True si l'URL est un endpoint de l'API REST PUBLIQUE WordPress
+    (/wp-json/wp/vN/pages|posts|media|...). L'id dans le chemin est manipulable
+    mais ne sert que du contenu déjà public -> PAS un IDOR. Exclu comme un asset."""
+    return bool(_WP_PUBLIC_API_RE.search(urlsplit(_url(t)).path))
+
+
 
 def _is_static_info(t):
     """True si le chemin est une page informationnelle (mentions légales, cookies,
@@ -314,7 +342,7 @@ def id_non_derive_session(t):
 
     Un chiffre dans un répertoire d'assets (/fonts/58, /pdfs/52) n'est PAS un
     identifiant applicatif : ces chemins sont exclus."""
-    if _is_asset(t) or _is_asset_dir(t):
+    if _is_asset(t) or _is_asset_dir(t) or _is_wp_public_api(t):
         return 0
     parts = urlsplit(_url(t))
     best = 0
@@ -729,6 +757,39 @@ def secu_absente(t):
 
 # --- La liste éditable : (nom, test, poids) -----------------------------------
 # poids = int pour un signal BOOLÉEN ; None pour un signal GRADUÉ (poids interne).
+
+def ssrf_param_possible(t):
+    """Signal SSRF : un param SSRF-able porte une valeur URL-like (surface, pure)."""
+    return bool(params_ssrf_presents(_url(t)))
+
+
+
+def sqli_param_possible(t):
+    """Signal SQLi : param à sémantique requête (q/search/filter/id...) présent."""
+    return bool(params_de(_url(t), SQLI_PARAMS))
+
+
+def ssti_param_possible(t):
+    """Signal SSTI : param à sémantique template/rendu (template/lang/render...) présent."""
+    return bool(params_de(_url(t), SSTI_PARAMS))
+
+
+def deser_surface(t):
+    """Signal déser : techno sérialisante (Java/.NET/Struts/ViewState) ET marqueur
+    de blob sérialisé (__VIEWSTATE, rO0AB=Java b64, param base64 long). Surface, pure."""
+    tech = ",".join(t.get("tech") or []).lower()
+    techno_ser = any(x in tech for x in ("java", "spring", "tomcat", "struts",
+                     "weblogic", "jboss", ".net", "asp.net", "viewstate"))
+    if not techno_ser:
+        return False
+    from urllib.parse import urlsplit, parse_qsl, unquote
+    u = _url(t)
+    hay = unquote(u).lower()
+    marqueur = ("__viewstate" in hay or "ro0ab" in hay or "ro0hz" in hay
+                or "aced0005" in hay)
+    return bool(techno_ser and marqueur)
+
+
 SIGNAUX = [
     ("fingerprint_produit",         fingerprint_produit,         None),
     ("id_non_derive_session",       id_non_derive_session,       None),
@@ -744,6 +805,10 @@ SIGNAUX = [
     ("tls_faible",                  tls_faible,                  POIDS_TLS_FAIBLE),
     # --- Tier 2B : signaux d'en-têtes ---
     ("cors_permissif",              cors_permissif,              None),
+    ("ssrf_param_possible",         ssrf_param_possible,         SSRF_PARAM_BONUS),
+    ("sqli_param_possible",         sqli_param_possible,         4),
+    ("ssti_param_possible",         ssti_param_possible,         4),
+    ("deser_surface",               deser_surface,               7),
     ("cookie_faible",               cookie_faible,               POIDS_COOKIE),
     ("server_bavard",               server_bavard,               1),
     ("auth_basic_exposee",          auth_basic_exposee,          POIDS_AUTH_BASIC),
