@@ -29,12 +29,22 @@ def _planning_semantique(intervalle):
     }
 
 
+def _planning_juge_v2(intervalle):
+    """V2 classe les représentants de Leads puis reconstruit la vue, sans rescore."""
+    return {
+        "juge-v2-rebuild-continu": {
+            "task": "juger_surface_v2_puis_rebuild",
+            "schedule": intervalle,
+        },
+    }
+
+
 app = Celery(
     "bb_automation",
     broker=BROKER_URL,
     backend=RESULT_BACKEND,
     include=["engine.tasks", "engine.recon.discover", "engine.scoring.score",
-             "engine.probe.probe", "engine.semantique_run"],
+             "engine.probe.probe", "engine.semantique_run", "engine.judge_v2"],
 )
 app.conf.update(
     result_expires=3600,
@@ -54,7 +64,12 @@ app.conf.update(
 #   SEM_BEAT_INTERVALLE_S   secondes entre deux runs (défaut 7200 = 2h)
 # juger_semantique s'auto-borne : ECHANTILLON_SEM (300) + MAX_APPELS_JUGE_PAR_RUN (300), et
 # ne juge que le résidu NON déjà jugé -> quand le résidu est vide, un tour ne coûte rien.
-if os.environ.get("SEM_BEAT_ACTIF", "0") == "1":
+if os.environ.get("JUGE_V2_BEAT_ACTIF", "0") == "1":
+    # V2 est exclusif : il partage le verrou de V1, mais ne doit pas laisser deux
+    # planifications concurrentes consommer le budget à chaque tick.
+    _intervalle_v2 = float(os.environ.get("JUGE_V2_INTERVALLE_S", "3600"))
+    app.conf.beat_schedule = _planning_juge_v2(_intervalle_v2)
+elif os.environ.get("SEM_BEAT_ACTIF", "0") == "1":
     _intervalle = float(os.environ.get("SEM_BEAT_INTERVALLE_S", "7200"))
     # Aucun délai estimé : le juge peut durer des heures. La tâche tient le même verrou de
     # session jusqu'au commit score puis au rebuild ; un tick concurrent saute toute la chaîne.

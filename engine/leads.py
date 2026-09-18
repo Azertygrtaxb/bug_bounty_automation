@@ -34,6 +34,7 @@ from urllib.parse import parse_qsl, urlsplit
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import psycopg  # noqa: E402
+from psycopg.types.json import Json  # noqa: E402
 
 from engine import scope  # noqa: E402
 from knowledge import config, harvest  # noqa: E402
@@ -229,6 +230,10 @@ def _assurer_table(cur):
     # DÉDIÉE (en plus de sa présence dans `raisons`) pour que le dashboard puisse l'afficher
     # comme badge / le filtrer sans parser le texte des raisons. NULL = pas encore jugé.
     cur.execute("ALTER TABLE leads ADD COLUMN IF NOT EXISTS semantique_verdict TEXT")
+    # V2 est une classification de surface séparée de V1. Conserver les deux rend la
+    # transition réversible et évite de détruire les verdicts historiques.
+    cur.execute("ALTER TABLE leads ADD COLUMN IF NOT EXISTS juge_v2 JSONB")
+    cur.execute("ALTER TABLE leads ADD COLUMN IF NOT EXISTS juge_v2_juge_le TIMESTAMPTZ")
     # Domaine parent (registered-domain) du host : permet au dashboard de REGROUPER les leads
     # d'une même entité (tous les sous-domaines de oneytrust.com ensemble) via GROUP BY, sans
     # recalculer ni détruire l'info host exacte (que la recon/le hunt utilisent comme cible).
@@ -256,7 +261,7 @@ def construire(seuil=1):
         with conn.cursor() as cur:
             cur.execute("SELECT id, host, url, score, COALESCE(score_raisons,'{}'), "
                         "http_status, COALESCE(tech,'{}'), COALESCE(tags,'{}'), cree_le, "
-                        "semantique_verdict "
+                        "semantique_verdict, juge_v2, juge_v2_juge_le "
                         "FROM targets WHERE score >= %s", (seuil,))
             rows = cur.fetchall()
 
@@ -266,7 +271,7 @@ def construire(seuil=1):
             roots = scope.charger_roots()
             gardes, exclus_hc = [], 0
             for (rid, host, url, score, raisons, http_status, tech, tags, cree_le,
-                 sem_verdict) in rows:
+                 sem_verdict, juge_v2, juge_v2_juge_le) in rows:
                 marque = "hors_cible_de_lancement" in ",".join(raisons)
                 dehors = scope.hors_scope(host, roots) or marque
                 if not config.INCLURE_HORS_SCOPE and dehors:
@@ -276,7 +281,9 @@ def construire(seuil=1):
                                "raisons": list(raisons or []), "http_status": http_status,
                                "tech": list(tech or []), "tags": tags,
                                "in_scope": not dehors, "cree_le": cree_le,
-                               "semantique_verdict": sem_verdict})
+                               "semantique_verdict": sem_verdict,
+                               "juge_v2": juge_v2,
+                               "juge_v2_juge_le": juge_v2_juge_le})
             apres_1b = len(gardes)
 
             # 1c — patternize + stockage tags.lead_pattern
@@ -317,6 +324,8 @@ def construire(seuil=1):
                        "http_status": rep["http_status"], "tech": rep["tech"],
                        "in_scope": rep["in_scope"], "premiere_vue": grp["premiere_vue"],
                        "semantique_verdict": rep.get("semantique_verdict"),
+                       "juge_v2": rep.get("juge_v2"),
+                       "juge_v2_juge_le": rep.get("juge_v2_juge_le"),
                        "domaine_parent": scope.registered_domain(host)})
     lignes.sort(key=lambda x: (x["score"], x["nb"]), reverse=True)
     # remap {(host, pattern_avant_collapse): pattern_apres} pour migrer les statuts.
@@ -434,6 +443,16 @@ def persister(lignes, remap=None):
         sys.stderr.write("[leads] AVERTISSEMENT : rebuild VIDE -> table `leads` NON "
                          "touchée (garde-fou A4).\n")
         return 0
+    # psycopg ne sait pas adapter seul un dict Python vers JSONB. Le Juge V2
+    # stocke une décision structurée : l'emballer explicitement avant l'INSERT.
+    lignes_sql = [
+        {
+            **ligne,
+            "juge_v2": Json(ligne["juge_v2"])
+            if ligne.get("juge_v2") is not None else None,
+        }
+        for ligne in lignes
+    ]
     with psycopg.connect(DATABASE_URL) as conn:
         with conn.cursor() as cur:
             _assurer_table(cur)
@@ -443,10 +462,11 @@ def persister(lignes, remap=None):
             cur.executemany(
                 "INSERT INTO leads (host, pattern, url_representative, score, raisons, "
                 "nb, http_status, tech, in_scope, premiere_vue, semantique_verdict, "
-                "domaine_parent, updated_at) "
+                "juge_v2, juge_v2_juge_le, domaine_parent, updated_at) "
                 "VALUES (%(host)s, %(pattern)s, %(url_representative)s, %(score)s, %(raisons)s, "
                 "%(nb)s, %(http_status)s, %(tech)s, %(in_scope)s, %(premiere_vue)s, "
-                "%(semantique_verdict)s, %(domaine_parent)s, now())", lignes)
+                "%(semantique_verdict)s, %(juge_v2)s, %(juge_v2_juge_le)s, "
+                "%(domaine_parent)s, now())", lignes_sql)
             _reconcilier_ancres(cur)                     # replié -> dé-replié (via ancre_url)
             _marquer_orphelins(cur)
         conn.commit()

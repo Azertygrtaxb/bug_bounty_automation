@@ -1,0 +1,17 @@
+# SURCHARGE LOCALE TEMPORAIRE — non suivie par git.
+# Fige places ET concurrence a 8 (un ecart entre les deux = tempete de refus).
+# A supprimer quand tu voudras piloter depuis .env (qui dit 24/24).
+services:
+  worker:
+    environment:
+      RL_GLOBAL_MAX_HOSTS: "8"
+      CELERY_CONCURRENCY: "8"
+
+# >>> bb-ops
+# Ajouté par bb-ops. Retrait propre : bb_board_ctl.sh --desinstaller-caddy
+  caddy:
+    extra_hosts:
+      - "hote:host-gateway"
+    volumes:
+      - /opt/bb-ops/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+# <<< bb-ops

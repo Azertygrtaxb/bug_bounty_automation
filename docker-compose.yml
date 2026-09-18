@@ -51,6 +51,15 @@ services:
       # alimente le dashboard V2 sans déclenchement manuel. 1 = actif. Le RYTHME = la dépense.
       SEM_BEAT_ACTIF: "${SEM_BEAT_ACTIF:-0}"                 # 1 = planifier le juge en continu
       SEM_BEAT_INTERVALLE_S: "${SEM_BEAT_INTERVALLE_S:-7200}" # défaut 2h entre deux batchs
+      # Juge V2 : priorise les représentants de Leads déjà stockés. S'il est activé,
+      # il remplace la planification V1 (jamais les deux en parallèle).
+      JUGE_V2_BEAT_ACTIF: "${JUGE_V2_BEAT_ACTIF:-0}"
+      JUGE_V2_INTERVALLE_S: "${JUGE_V2_INTERVALLE_S:-3600}"
+      JUGE_V2_MIN_SCORE: "${JUGE_V2_MIN_SCORE:-8}"
+      JUGE_V2_ECHANTILLON: "${JUGE_V2_ECHANTILLON:-100}"
+      JUGE_V2_MAX_APPELS: "${JUGE_V2_MAX_APPELS:-100}"
+      JUGE_V2_MODELE: "${JUGE_V2_MODELE:-claude-sonnet-5}"
+      JUGE_V2_EFFORT: "${JUGE_V2_EFFORT:-low}"
     depends_on:
       postgres:
         condition: service_healthy

@@ -153,6 +153,18 @@ PLAFOND_SEM = int(os.environ.get("PLAFOND_SEM", "5"))              # garde-fou d
 # nombre de lignes). Plafond dur pour ne pas bloquer un rush indéfiniment sur l'API.
 TIMEOUT_JUGE_SEM = int(os.environ.get("TIMEOUT_JUGE_SEM", "3600"))  # 1h : couvre un batch Anthropic lent
 
+# --- Juge V2 : classification de SURFACE des représentants visibles dans Leads -------
+# V2 ne touche pas au score déterministe : il fournit à l'humain une lecture explicable
+# (surface + indices + confiance) avant l'envoi manuel vers Operations. Le lot initial est
+# volontairement plus petit que V1 afin de calibrer les sorties sur les vrais findings avant
+# toute hausse de dépense.
+MODELE_JUGE_V2 = os.environ.get("JUGE_V2_MODELE", MODELE_JUGE)
+EFFORT_JUGE_V2 = os.environ.get("JUGE_V2_EFFORT", EFFORT_JUGE)
+EXTRAIT_JUGE_V2_MAX = int(os.environ.get("JUGE_V2_EXTRAIT_MAX", str(EXTRAIT_JUGE_MAX)))
+JUGE_V2_MIN_SCORE = int(os.environ.get("JUGE_V2_MIN_SCORE", "8"))
+JUGE_V2_ECHANTILLON = int(os.environ.get("JUGE_V2_ECHANTILLON", "100"))
+JUGE_V2_MAX_APPELS = int(os.environ.get("JUGE_V2_MAX_APPELS", "100"))
+
 # --- Anti-bruteforce du login board : au-delà de BOARD_MAX_ECHECS tentatives ratées par
 # (compte, IP) dans BOARD_FENETRE_ECHECS secondes -> 429, sans comparer le mot de passe.
 BOARD_MAX_ECHECS = int(os.environ.get("BOARD_MAX_ECHECS", "5"))
